@@ -1,0 +1,35 @@
+# IDX (Imaging / Camera) DRIVER TEMPLATE -- PARAMS / MANIFEST
+# See lsx_template/lsx_template_params.yaml for the annotated field reference.
+#
+# TWO THINGS ARE DIFFERENT FROM THE SERIAL TEMPLATES:
+#   1. DRIVER_DICT names a REAL driver file/class (idx cameras split raw I/O
+#      into a separate _driver.py that the node imports at runtime).
+#   2. DISCOVERY_DICT.process is LAUNCH, not CALL -- discovery runs as its own
+#      node instead of being called inside drivers_mgr.
+
+driver:
+  pkg_name: IDX_TEMPLATE
+  display_name: Template Camera
+  description: Example IDX/camera driver template (LAUNCH discovery + driver split)
+  type: IDX
+  group_id: None
+
+  NODE_DICT:
+    file_name: idx_template_node.py
+    class_name: IdxTemplateNode
+
+  DRIVER_DICT:
+    file_name: idx_template_driver.py
+    class_name: IdxTemplateDriver
+
+  DISCOVERY_DICT:
+    file_name: idx_template_discovery.py
+    class_name: IdxTemplateDiscovery
+    process: LAUNCH
+    OPTIONS:
+      data_products:
+        type: Selection
+        options:
+          - 'color_image'
+        default: 'color_image'
+        value: 'color_image'

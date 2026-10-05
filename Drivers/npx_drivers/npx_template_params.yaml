@@ -1,0 +1,33 @@
+# NPX (Navigation / NavPose) DRIVER TEMPLATE -- PARAMS / MANIFEST
+# See lsx_template/lsx_template_params.yaml for the annotated field reference.
+
+driver:
+  pkg_name: NPX_TEMPLATE
+  display_name: Template NavPose Sensor
+  description: Example TCP NPX navpose source driver template
+  type: NPX
+  group_id: None
+
+  NODE_DICT:
+    file_name: npx_template_node.py
+    class_name: NpxTemplateNode
+
+  # No separate driver file: the node does its own TCP I/O.
+  DRIVER_DICT:
+    file_name: None
+    class_name: None
+
+  DISCOVERY_DICT:
+    file_name: npx_template_discovery.py
+    class_name: NpxTemplateDiscovery
+    process: CALL
+    OPTIONS:
+      # For a network navpose source the endpoint IS the configuration.
+      tcp_host:
+        type: String
+        default: '127.0.0.1'
+        value: '127.0.0.1'
+      tcp_port:
+        type: Int
+        default: '50000'
+        value: '50000'

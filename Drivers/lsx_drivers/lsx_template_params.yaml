@@ -1,0 +1,62 @@
+# LSX (Lighting) DRIVER TEMPLATE -- PARAMS / MANIFEST
+# ---------------------------------------------------------------------------
+# This YAML is the driver's manifest. drivers_mgr reads it to learn which
+# files/classes make up the driver and what user-configurable OPTIONS to show.
+# At runtime drivers_mgr injects two extra keys into this dict before the node
+# sees it:  'path' (the install dir) and 'DEVICE_DICT' (written by discovery).
+#
+# Rename every 'template'/'Template' token, and make pkg_name + the file_name /
+# class_name entries match the actual files/classes in this folder EXACTLY.
+
+driver:
+  pkg_name: LSX_TEMPLATE            # unique id; matches PKG_NAME in the .py files
+  display_name: Template LED Light  # shown in the RUI
+  description: Example serial LSX lighting driver template
+  type: LSX                         # IDX | LSX | NPX | PTX | RBX | SVX
+  group_id: None
+
+  NODE_DICT:
+    file_name: lsx_template_node.py
+    class_name: LsxTemplateNode
+
+  # Serial LSX devices do their own I/O in the node, so there is no driver file.
+  DRIVER_DICT:
+    file_name: None
+    class_name: None
+
+  DISCOVERY_DICT:
+    file_name: lsx_template_discovery.py
+    class_name: LsxTemplateDiscovery
+    process: CALL                   # CALL = drivers_mgr calls discoveryFunction()
+    OPTIONS:
+      # Each OPTION becomes a user control; discovery reads ['value'].
+      # 'type' must be a nepi_controls CONTROL_TYPE -- drivers_mgr builds a
+      # controls dict out of these before the RUI renders them. 'Selection' is
+      # a named option list; 'Discrete' is NOT a control type and an option
+      # declared that way is silently dropped and never appears in the RUI.
+      # On an Int/Float OPTION the two-entry 'options' list is read as the
+      # min/max bounds pair -- that form is still correct HERE, unlike in a
+      # node's CAP_SETTINGS, where min/max moved to 'bounds'.
+      baud_rate:
+        type: Selection
+        options:
+          - All
+          - '9600'
+          - '19200'
+          - '57600'
+        default: All
+        value: All
+      start_addr:
+        type: 'Int'
+        options:
+          - '1'
+          - '255'
+        default: '1'
+        value: '1'
+      stop_addr:
+        type: 'Int'
+        options:
+          - '1'
+          - '255'
+        default: '10'
+        value: '10'

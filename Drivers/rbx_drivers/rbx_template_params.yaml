@@ -1,0 +1,33 @@
+# RBX (Robot) DRIVER TEMPLATE -- PARAMS / MANIFEST
+# See lsx_template/lsx_template_params.yaml for the annotated field reference.
+
+driver:
+  pkg_name: RBX_TEMPLATE
+  display_name: Template Robot
+  description: Example RBX robot driver template (CALL discovery + optional companion node)
+  type: RBX
+  group_id: None
+
+  NODE_DICT:
+    file_name: rbx_template_node.py
+    class_name: RbxTemplateNode
+
+  # No separate driver file: robot I/O goes through a companion node/protocol.
+  DRIVER_DICT:
+    file_name: None
+    class_name: None
+
+  DISCOVERY_DICT:
+    file_name: rbx_template_discovery.py
+    class_name: RbxTemplateDiscovery
+    process: CALL
+    OPTIONS:
+      baud_rate:
+        type: Selection
+        options:
+          - '57600'
+          - '115200'
+        default: '57600'
+        value: '57600'
+      # A real robot driver often also exposes a connection-type option
+      # (SERIAL / TCP / UDP) here, like the shipped rbx_ardupilot driver.

@@ -1,0 +1,54 @@
+# SVX (Servo) DRIVER TEMPLATE -- PARAMS / MANIFEST
+# See lsx_drivers/lsx_template_params.yaml for the annotated field reference.
+#
+# WHAT IS DIFFERENT FROM THE OTHER SERIAL TEMPLATES:
+#   One controller board drives SEVERAL channels over one transport, and each
+#   channel is its own SVX device with its own node. So the OPTIONS here are
+#   BOARD-level only. Everything describing an individual servo -- its travel
+#   range, its drive endpoints, its acceleration -- is a NODE setting, shown in
+#   that device's own Device Settings panel and persisted per device, because
+#   two servos on one board routinely differ. Discovery must never overwrite an
+#   operator's calibration.
+
+driver:
+  pkg_name: SVX_TEMPLATE            # unique id; matches PKG_NAME in the .py files
+  display_name: Template Servo      # shown in the RUI
+  description: Example serial SVX single-servo driver template (one node per channel)
+  type: SVX                         # IDX | LSX | NPX | PTX | RBX | SVX
+  group_id: None
+
+  NODE_DICT:
+    file_name: svx_template_node.py
+    class_name: SvxTemplateNode
+
+  # Serial SVX devices do their own I/O in the node, so there is no driver file.
+  DRIVER_DICT:
+    file_name: None
+    class_name: None
+
+  DISCOVERY_DICT:
+    file_name: svx_template_discovery.py
+    class_name: SvxTemplateDiscovery
+    process: CALL                   # CALL = drivers_mgr calls discoveryFunction()
+    OPTIONS:
+      # An open-loop servo has no feedback wire, so a board cannot detect
+      # whether a servo is physically attached to a channel. Which channels
+      # carry servos is user-declared config, never auto-detected -- probing
+      # would invent phantom devices. One node is launched per listed channel,
+      # and the list can be edited while the driver is running.
+      channels:
+        type: 'String'
+        description: 'Which channels carry servos. Comma-separated, any subset in any order (e.g. "0", "0,1", "4,5"), or "all" for every channel on the board. Out-of-range entries are ignored with a warning.'
+        default: 'all'
+        value: 'all'
+      baud_rate:
+        type: Selection
+        description: 'Serial baud rate. Ignored for a USB command port (USB is not rate-limited); kept for TTL/UART use.'
+        options:
+          - '9600'
+          - '19200'
+          - '38400'
+          - '57600'
+          - '115200'
+        default: '9600'
+        value: '9600'
