@@ -1,0 +1,15 @@
+APP_DICT:
+  display_name: Template App
+  description: Template application demonstrating the standard NEPI app pattern
+  pkg_name: nepi_app_template
+  group_name: DATA
+  config_file: app_template.yaml
+  app_file: template_app_node.py
+  node_name: app_template
+  license_type: 3-clause BSD
+  license_link: https://opensource.org/licenses/BSD-3-Clause
+RUI_DICT:
+  rui_files:
+  - NepiAppTemplate.js
+  rui_main_file: NepiAppTemplate.js
+  rui_main_class: NepiAppTemplate
