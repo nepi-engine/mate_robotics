@@ -1,0 +1,15 @@
+APP_DICT:
+  display_name: Custom Robot
+  description: Builds one RBX robot device from a selected motor device and NavPose (NPX) source, with a camera (IDX) connect for the image viewer
+  pkg_name: nepi_app_custom_robot
+  group_name: AUTOMATION
+  config_file: app_custom_robot.yaml
+  app_file: custom_robot_app_node.py
+  node_name: app_custom_robot
+  license_type: 3-clause BSD
+  license_link: https://opensource.org/licenses/BSD-3-Clause
+RUI_DICT:
+  rui_files:
+  - NepiAppCustomRobot.js
+  rui_main_file: NepiAppCustomRobot.js
+  rui_main_class: NepiAppCustomRobot
