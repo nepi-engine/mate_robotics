@@ -1,0 +1,15 @@
+APP_DICT:
+  display_name: Robot Stabilization
+  description: Robot auto-stabilization app skeleton with servo, light, motor, NavPose and camera connects
+  pkg_name: nepi_app_robot_stab
+  group_name: AUTOMATION
+  config_file: app_robot_stab.yaml
+  app_file: robot_stab_app_node.py
+  node_name: app_robot_stab
+  license_type: 3-clause BSD
+  license_link: https://opensource.org/licenses/BSD-3-Clause
+RUI_DICT:
+  rui_files:
+  - NepiAppRobotStab.js
+  rui_main_file: NepiAppRobotStab.js
+  rui_main_class: NepiAppRobotStab
