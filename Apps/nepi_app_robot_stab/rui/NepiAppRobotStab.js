@@ -34,9 +34,10 @@
  * apps declaring the same class name break the build.
  *
  * Layout is the 75 / 2 / 23 split NepiAppIDXConnect.js uses:
- *   - left 75%:  the image viewer, driven by the IDX connect's selection.
+ *   - left 75%:  the image viewer. The camera and data product are picked on
+ *     this page (local state, not persisted); see renderSelection().
  *   - right 23%: what the node REPORTS (this app's own status message), the
- *     device connect selector rows, then what the operator ADJUSTS (the shared
+ *     RBX / Targets / Obstacles selector rows, then what the operator ADJUSTS (the shared
  *     Nepi_IF_Controls renderer, fed by the node's ControlsStatus -- do not
  *     hand-write a widget per value) and the config box.
  *
@@ -48,8 +49,10 @@
  *
  * Each Nepi_IF_Connect<X> row is handed its CONNECT namespace
  * (<app>/<connect_name>), which the node's Connect*IF owns end to end:
- * discovery, the persisted selection, ConnectIFStatus and select_topic. This
- * page selects nothing itself.
+ * discovery, the persisted selection, ConnectIFStatus and select_topic. The
+ * Obstacles row is the exception: ConnectObstaclesIF is not a ConnectNodeIF and
+ * publishes no ConnectIFStatus, so that row is built inline here (as the
+ * WPILib IF page does) and publishes the pick to <app>/set_obstacles_namespace.
  */
 
 import React, { Component } from "react"
@@ -64,10 +67,8 @@ import BooleanIndicator from "./BooleanIndicator"
 import Styles from "./Styles"
 
 import NepiIFImageViewer from "./Nepi_IF_ImageViewer"
-import NepiIFConnectIDX from "./Nepi_IF_ConnectIDX"
-import NepiIFConnectLSX from "./Nepi_IF_ConnectLSX"
-import NepiIFConnectMotor from "./Nepi_IF_ConnectMotor"
-import NepiIFConnectNPX from "./Nepi_IF_ConnectNPX"
+import NepiIFConnectRBX from "./Nepi_IF_ConnectRBX"
+import NepiIFConnectTargets from "./Nepi_IF_ConnectTargets"
 
 import NepiIFControls from "./Nepi_IF_Controls"
 import NepiIFConfig from "./Nepi_IF_Config"
@@ -77,13 +78,21 @@ import NepiIFConfig from "./Nepi_IF_Config"
 // derive the same name independently.
 const CONTROLS_NAME = "controls"
 
-// Must match CONNECT_NAME in each nepi_api/connect_device_if_<type>.py. The
-// node constructs every connect with its default name. The servo connect
-// (svx_connect) has no row yet -- see renderConnections().
-const IDX_CONNECT_NAME = "idx_connect"
-const LSX_CONNECT_NAME = "lsx_connect"
-const MOTOR_CONNECT_NAME = "motor_connect"
-const NPX_CONNECT_NAME = "npx_connect"
+// Must match CONNECT_NAME in nepi_api/connect_device_if_rbx.py and
+// TARGETS_CONNECT_NAME in nepi_api/connect_process_if_targets.py. The node
+// constructs both connects with their default names.
+const RBX_CONNECT_NAME = "rbx_connect"
+const TARGETS_CONNECT_NAME = "targets_connect"
+
+// Message type every obstacles app publishes on <app>/obstacles/status. The
+// Obstacles row's option list is every topic of this type currently on the
+// system, with the trailing /obstacles/status stripped back off to give the app
+// namespace ConnectObstaclesIF takes. Same discovery as the WPILib IF page.
+const OBSTACLES_STATUS_TYPE = "nepi_app_obstacles/ObstaclesStatus"
+const OBSTACLES_STATUS_SUFFIX = "/obstacles/status"
+
+// Unselected state of the Obstacles row, matching NONE_NAMESPACE in the node.
+const OBSTACLES_NONE = "None"
 
 @inject("ros")
 @observer
@@ -102,21 +111,25 @@ class NepiAppRobotStab extends Component {
       appNamespace: null,
 
       // Read-only status fields — mirror NepiAppRobotStabStatus.msg. The
-      // *_connected fields are not repeated here: each connect row below
-      // renders its own Connected indicator.
+      // rbx/targets *_connected fields are not repeated here: each connect row
+      // below renders its own Connected indicator.
       enabled: false,
       selected_option: "None",
       value: 0.0,
+      obstacles_connected: false,
+      selected_obstacles_namespace: null,
+
+      // Operator's obstacles app selection, held locally so the row shows the
+      // pick straight away in the window before the node's next status message
+      // reports it back. Once status arrives, selected_obstacles_namespace is
+      // authoritative.
+      obstacles_namespace: OBSTACLES_NONE,
 
       statusListener: null,
       connected: false,
 
-      // IDX connect namespace (<app>/idx_connect) the second listener is
-      // pointed at
-      idxConnectNamespace: null,
-      idxConnectStatusListener: null,
-
-      // Selected camera topic (<device>/idx), sourced from ConnectIFStatus
+      // Selected camera (<device>/idx), picked on this page from the IDX
+      // devices the ros store already tracks. Local to the page.
       selected_topic: 'None',
 
       // Image viewer data product selection, local to this page
@@ -130,8 +143,12 @@ class NepiAppRobotStab extends Component {
     this.getConnectNamespace = this.getConnectNamespace.bind(this)
     this.statusListener = this.statusListener.bind(this)
     this.updateStatusListener = this.updateStatusListener.bind(this)
-    this.updateIdxConnectStatusListener = this.updateIdxConnectStatusListener.bind(this)
-    this.idxConnectStatusListener = this.idxConnectStatusListener.bind(this)
+    this.getObstaclesNamespaces = this.getObstaclesNamespaces.bind(this)
+    this.getSelectedObstaclesNamespace = this.getSelectedObstaclesNamespace.bind(this)
+    this.onObstaclesSelected = this.onObstaclesSelected.bind(this)
+
+    this.createCameraOptions = this.createCameraOptions.bind(this)
+    this.onCameraSelected = this.onCameraSelected.bind(this)
 
     this.createDataProductOptions = this.createDataProductOptions.bind(this)
     this.onDataProductSelected = this.onDataProductSelected.bind(this)
@@ -184,6 +201,8 @@ class NepiAppRobotStab extends Component {
       enabled: message.enabled,
       selected_option: message.selected_option,
       value: message.value,
+      obstacles_connected: message.obstacles_connected,
+      selected_obstacles_namespace: message.selected_obstacles_namespace,
       connected: true,
     })
   }
@@ -204,44 +223,11 @@ class NepiAppRobotStab extends Component {
     })
   }
 
-  // Second listener, on the IDX connect's own status topic
-  // (<app>/idx_connect/status, ConnectIFStatus). The page reads it only to
-  // learn which camera is selected, so the image viewer can follow it.
-  updateIdxConnectStatusListener() {
-    const namespace = this.getConnectNamespace(IDX_CONNECT_NAME)
-    if (this.state.idxConnectStatusListener != null) {
-      this.state.idxConnectStatusListener.unsubscribe()
-      this.setState({ idxConnectStatusListener: null })
-    }
-    if (namespace != null && namespace !== 'None') {
-      var idxConnectStatusListener = this.props.ros.setupStatusListener(
-        namespace + '/status',
-        "nepi_interfaces/ConnectIFStatus",
-        this.idxConnectStatusListener
-      )
-      this.setState({ idxConnectStatusListener: idxConnectStatusListener })
-    }
-    this.setState({ idxConnectNamespace: namespace })
-  }
-
-  // Clears the data product selection whenever the selected camera changes so
-  // the image viewer re-resolves.
-  idxConnectStatusListener(message) {
-    if (message.selected_topic !== this.state.selected_topic) {
-      this.setState({
-        selected_topic: message.selected_topic,
-        data_topic: 'None',
-        data_product: 'None'
-      })
-    }
-  }
-
   componentDidMount() {
     const namespace = this.getAppNamespace()
     if (namespace !== null) {
       this.updateStatusListener(namespace)
     }
-    this.updateIdxConnectStatusListener()
   }
 
   componentDidUpdate(prevProps, prevState) {
@@ -252,19 +238,74 @@ class NepiAppRobotStab extends Component {
         this.updateStatusListener(namespace)
       }
     }
-    // Re-point the IDX connect listener when its namespace resolves or changes.
-    const idxConnectNamespace = this.getConnectNamespace(IDX_CONNECT_NAME)
-    if (idxConnectNamespace !== this.state.idxConnectNamespace) {
-      this.updateIdxConnectStatusListener()
-    }
   }
 
   componentWillUnmount() {
     if (this.state.statusListener) {
       this.state.statusListener.unsubscribe()
     }
-    if (this.state.idxConnectStatusListener) {
-      this.state.idxConnectStatusListener.unsubscribe()
+  }
+
+  // Live list of obstacles app namespaces, read off the topic/type lists the
+  // ros store already keeps for the whole system. An obstacles app is any node
+  // publishing <app>/obstacles/status as an ObstaclesStatus.
+  getObstaclesNamespaces() {
+    const { topicNames, topicTypes } = this.props.ros
+    var namespaces = []
+    if (topicNames == null || topicTypes == null) {
+      return namespaces
+    }
+    for (var i = 0; i < topicNames.length; i++) {
+      if (topicTypes[i] === OBSTACLES_STATUS_TYPE &&
+          topicNames[i].endsWith(OBSTACLES_STATUS_SUFFIX)) {
+        namespaces.push(topicNames[i].slice(0, -OBSTACLES_STATUS_SUFFIX.length))
+      }
+    }
+    namespaces.sort()
+    return namespaces
+  }
+
+  // What the Obstacles row shows. The node's status is authoritative once it
+  // arrives, with the local pick covering the window before the first status.
+  getSelectedObstaclesNamespace() {
+    const selected = this.state.selected_obstacles_namespace
+    if (selected != null && selected !== '') {
+      return selected
+    }
+    return this.state.obstacles_namespace
+  }
+
+  onObstaclesSelected(event) {
+    const appNamespace = this.getAppNamespace()
+    const value = event.target.value
+    this.setState({ obstacles_namespace: value })
+    if (appNamespace != null) {
+      this.props.ros.sendStringMsg(appNamespace + '/set_obstacles_namespace', value)
+    }
+  }
+
+  // Camera options: every IDX device namespace the ros store tracks.
+  createCameraOptions() {
+    const { idxDevices } = this.props.ros
+    const namespaces = (idxDevices != null) ? Object.keys(idxDevices).sort() : []
+    var items = []
+    items.push(<Option value={"None"}>{"None"}</Option>)
+    for (var i = 0; i < namespaces.length; i++) {
+      items.push(<Option value={namespaces[i]}>{namespaces[i].split('/idx')[0].split('/').pop()}</Option>)
+    }
+    return items
+  }
+
+  // Clears the data product selection whenever the selected camera changes so
+  // the image viewer re-resolves.
+  onCameraSelected(event) {
+    const value = event.target.value
+    if (value !== this.state.selected_topic) {
+      this.setState({
+        selected_topic: value,
+        data_topic: 'None',
+        data_product: 'None'
+      })
     }
   }
 
@@ -341,25 +382,31 @@ class NepiAppRobotStab extends Component {
     )
   }
 
-  // Data product selection section. Local to this page and drives the image
-  // viewer; the camera selection itself belongs to the IDX connect row.
+  // Camera and data product selection. Local to this page and drives the
+  // image viewer only. The node has no camera connect: the targets connect's
+  // ConnectIFStatus names no image topic for the viewer to follow, so the
+  // camera is picked here, with the same data-product pattern as before.
   renderSelection() {
     const device_selected = (this.state.selected_topic !== null && this.state.selected_topic !== 'None')
-
-    if (device_selected === false) {
-      return (
-        <Columns>
-          <Column>
-
-          </Column>
-        </Columns>
-      )
-    }
 
     return (
       <Section title={"Selection"}>
 
-        {this.renderDataProductSelector()}
+        <div align={"left"} textAlign={"left"}>
+          <Label title={"Camera"}>
+            <Select
+              id="cameraSelect"
+              onChange={this.onCameraSelected}
+              value={this.state.selected_topic}
+            >
+              {this.createCameraOptions()}
+            </Select>
+          </Label>
+        </div>
+
+        {(device_selected === true) ?
+          this.renderDataProductSelector()
+          : null}
 
       </Section>
     )
@@ -432,13 +479,13 @@ class NepiAppRobotStab extends Component {
     )
   }
 
-  // One selector row per device connect, selector only: device controls and
-  // data are not rendered by this app. With make_section={false} every row's
-  // own label is just "Device", so each row needs a title above it.
-  // Nepi_IF_ConnectIDX and Nepi_IF_ConnectMotor draw that title themselves
-  // with show_connect_header={true}. Nepi_IF_ConnectLSX and Nepi_IF_ConnectNPX
-  // have no header option and read title only for their own Section, so this
-  // page draws a matching bold Label above those two instead.
+  // One selector row per connect, selector only: device controls and data
+  // are not rendered by this app. Nepi_IF_ConnectRBX draws its own title with
+  // show_connect_header={true}. Nepi_IF_ConnectTargets takes the same props
+  // the WPILib IF page passes it. The Obstacles row is built inline from
+  // Label and Select, as on the WPILib IF page: there is no
+  // Nepi_IF_ConnectObstacles.js, because ConnectObstaclesIF publishes no
+  // ConnectIFStatus for one to bind to.
   renderConnections() {
     const appNamespace = this.getAppNamespace()
 
@@ -446,26 +493,27 @@ class NepiAppRobotStab extends Component {
       return null
     }
 
+    const obstacles_namespaces = this.getObstaclesNamespaces()
+    const obstacles_selected = this.getSelectedObstaclesNamespace()
+
+    var obstacles_items = []
+    obstacles_items.push(<Option value={OBSTACLES_NONE}>{OBSTACLES_NONE}</Option>)
+    for (var i = 0; i < obstacles_namespaces.length; i++) {
+      obstacles_items.push(
+        <Option value={obstacles_namespaces[i]}>{obstacles_namespaces[i]}</Option>
+      )
+    }
+
     return (
       <React.Fragment>
 
         <div style={{ borderTop: "1px solid #ffffff", marginTop: Styles.vars.spacing.medium, marginBottom: Styles.vars.spacing.xs }} />
 
-        <Label title={"Device Connections"} />
+        <Label title={"Connections"} />
 
-        {/* SERVO ROW -- PENDING: Nepi_IF_ConnectSVX.js does not exist yet (a missing import breaks the whole RUI build).
-            Mount from NepiAppSVXConnect.js; on uncommenting, use this.getConnectNamespace("svx_connect") and the rows' selector-only props.
-
-            import NepiIFConnectSVX from "./Nepi_IF_ConnectSVX"
-            ...
-            <NepiIFConnectSVX namespace={connectNamespace} title={"SVX Connect"}
-                              show_selector={true} show_data={true}
-                              make_section={make_section} />
-        */}
-
-        <NepiIFConnectIDX
-          namespace={this.getConnectNamespace(IDX_CONNECT_NAME)}
-          title={"Camera (IDX)"}
+        <NepiIFConnectRBX
+          namespace={this.getConnectNamespace(RBX_CONNECT_NAME)}
+          title={"Robot (RBX)"}
           show_connect_header={true}
           show_selector={true}
           show_controls={false}
@@ -473,33 +521,34 @@ class NepiAppRobotStab extends Component {
           make_section={false}
         />
 
-        <Label title={"Light (LSX)"} labelStyle={{fontWeight: 'bold'}} />
-        <NepiIFConnectLSX
-          namespace={this.getConnectNamespace(LSX_CONNECT_NAME)}
+        <NepiIFConnectTargets
+          namespace={this.getConnectNamespace(TARGETS_CONNECT_NAME)}
+          title={"Targets"}
           show_selector={true}
-          show_controls={false}
           show_data={false}
+          show_controls={false}
+          shortened={true}
           make_section={false}
         />
 
-        <NepiIFConnectMotor
-          namespace={this.getConnectNamespace(MOTOR_CONNECT_NAME)}
-          title={"Motor"}
-          show_connect_header={true}
-          show_selector={true}
-          show_controls={false}
-          show_data={false}
-          make_section={false}
-        />
+        <Columns>
+          <Column>
 
-        <Label title={"NavPose (NPX)"} labelStyle={{fontWeight: 'bold'}} />
-        <NepiIFConnectNPX
-          namespace={this.getConnectNamespace(NPX_CONNECT_NAME)}
-          show_selector={true}
-          show_controls={false}
-          show_data={false}
-          make_section={false}
-        />
+            <Label title={"Obstacles"}>
+              <Select
+                onChange={this.onObstaclesSelected}
+                value={obstacles_selected}
+              >
+                {obstacles_items}
+              </Select>
+            </Label>
+
+            <Label title={"Obstacles Connected"}>
+              <BooleanIndicator value={this.state.obstacles_connected} />
+            </Label>
+
+          </Column>
+        </Columns>
 
       </React.Fragment>
     )
@@ -556,7 +605,7 @@ class NepiAppRobotStab extends Component {
     )
   }
 
-  // Right-hand 23% panel, top to bottom: status, device connections, controls,
+  // Right-hand 23% panel, top to bottom: status, connections, controls,
   // config.
   renderPanel() {
     return (

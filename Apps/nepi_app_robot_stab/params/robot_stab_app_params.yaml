@@ -1,6 +1,6 @@
 APP_DICT:
   display_name: Robot Stabilization
-  description: Robot auto-stabilization app skeleton with servo, light, motor, NavPose and camera connects
+  description: Robot auto-stabilization app skeleton with RBX robot, targets and obstacles connects
   pkg_name: nepi_app_robot_stab
   group_name: AUTOMATION
   config_file: app_robot_stab.yaml

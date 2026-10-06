@@ -415,47 +415,57 @@ Adding an app = dropping the package folder into
 
 ---
 
-## 9. Device connections (nepi_app_robot_stab)
+## 9. Connections (nepi_app_robot_stab)
 
-`robot_stab_app_node.py` constructs five device connects in `setupConnects()`,
-after `setupControls()` and before the explicit `initCb`. Each is a
-`Connect*IF` from `nepi_api` that owns one RUI selector row end to end:
-discovery, its own persisted `selected_topic` param, a `std_msgs/String`
-subscriber on `<app>/<connect_name>/select_topic`, and a
-`nepi_interfaces/ConnectIFStatus` on `<app>/<connect_name>/status`. The node
-selects nothing itself.
+`robot_stab_app_node.py` has exactly three connects, all set up in
+`setupConnects()` after `setupControls()` and before the explicit `initCb`.
 
-| Device | Class (`nepi_api` module) | Connect namespace | RUI row |
+| Connect | Class (`nepi_api` module) | Namespace | RUI row |
 |---|---|---|---|
-| Servo | `ConnectSVXDeviceIF` (`connect_device_if_svx`) | `<app>/svx_connect` | pending (see below) |
-| Camera | `ConnectIDXDeviceIF` (`connect_device_if_idx`) | `<app>/idx_connect` | `Nepi_IF_ConnectIDX` |
-| Light | `ConnectLSXDeviceIF` (`connect_device_if_lsx`) | `<app>/lsx_connect` | `Nepi_IF_ConnectLSX` |
-| Motor | `ConnectMotorsDeviceIF` (`connect_device_if_motor`) | `<app>/motor_connect` | `Nepi_IF_ConnectMotor` |
-| NavPose | `ConnectNPXDeviceIF` (`connect_device_if_npx`) | `<app>/npx_connect` | `Nepi_IF_ConnectNPX` |
+| Robot | `ConnectRBXDeviceIF` (`connect_device_if_rbx`) | `<app>/rbx_connect` | `Nepi_IF_ConnectRBX` |
+| Targets | `ConnectProcessIFTargets` (`connect_process_if_targets`) | `<app>/targets_connect` | `Nepi_IF_ConnectTargets` |
+| Obstacles | `ConnectObstaclesIF` (`connect_obstacles_if`, installed by `nepi_app_obstacles`) | the selected obstacles app's namespace | inline Label + Select |
 
-All five are built with the default connect names, `show_selector=True`,
-`show_controls=False`, `show_data=False`, `msg_if=self.msg_if`, and no
-`namespace` or `node_if` (2026-07 DECISION LOG). `ConnectMotorsDeviceIF` and
-`ConnectIDXDeviceIF` take no `auto_select_enabled` argument -- passing one
-raises `TypeError`. The others keep the default, which is right for one
-servo; a consumer driving more than one servo needs one `ConnectSVXDeviceIF`
-per servo, each with a distinct `connect_name` and `auto_select_enabled=False`.
-Each connect's `check_connection()` is reported in the app status as
-`servo_connected`, `light_connected`, `motor_connected`, `npx_connected` and
-`idx_connected`; selection state stays on each connect's own `ConnectIFStatus`.
+**RBX and Targets** are `ConnectNodeIF`s. Each owns its RUI selector row end to
+end: discovery, its own persisted `selected_topic` param, a `std_msgs/String`
+subscriber on `<app>/<connect_name>/select_topic`, and a
+`nepi_interfaces/ConnectIFStatus` on `<app>/<connect_name>/status`. Both are
+built once, unconditionally, with their default connect names,
+`show_selector=True`, `show_controls=False`, `show_data=False`,
+`msg_if=self.msg_if`, and no `namespace` or `node_if` (2026-07 DECISION LOG),
+then waited on with `wait_for_ready(timeout = 10)` and unregistered on
+shutdown. The RBX row is meant to select the RBX device
+`nepi_app_custom_robot` hosts at `<custom_robot_app>/rbx`. The targets connect
+is constructed the same way the WPILib IF app constructs its own.
 
-**Image viewer.** The RUI page (75 / 2 / 23 split, ported from
-`nepi_app_idx_connect`) runs a second listener on `<app>/idx_connect/status`
-to track the selected camera. The IDX `selected_topic` is already the
-device's `<device>/idx` namespace, so the data-product Select lists
-`<selected_topic>/<data_product>` from `idxDevices[selected_topic]` and
-`findImageTopic()` resolves the image topic from `imageTopics`;
-`Nepi_IF_ImageViewer` renders only once a camera is selected.
+**Obstacles** follows the WPILib IF app. `ConnectObstaclesIF` is not a
+`ConnectNodeIF`: it has no selector, no auto-discovery and publishes no
+`ConnectIFStatus`. The page lists every topic of type
+`nepi_app_obstacles/ObstaclesStatus` ending in `/obstacles/status`, strips that
+suffix to get app namespaces, and publishes the operator's pick (or `None`) to
+`<app>/set_obstacles_namespace`. That subscriber is registered
+unconditionally. `setObstaclesNamespaceCb` is change-gated and calls
+`connectObstacles()`, which unregisters any previous instance, treats
+`None`/empty as a disconnect, and builds `ConnectObstaclesIF(namespace=...,
+dataCB=None)` inside try/except, leaving `obstacles_if = None` on failure. The
+selection starts at `None` on every node start (not persisted, as in WPILib).
 
-**Servo row pending.** `Nepi_IF_ConnectSVX.js` does not exist in nepi_rui
-yet, and importing a missing file breaks the whole RUI build. The node
-already runs the SVX connect; the page carries a commented-out placeholder at
-the top of the Device Connections stack holding the mount from
-`nepi_app_svx_connect/rui/NepiAppSVXConnect.js`. Uncomment it only after the
-component lands, pointing it at `<app>/svx_connect` with the same
-selector-only props as the other rows.
+**Runtime dependency.** `from nepi_api.connect_obstacles_if import
+ConnectObstaclesIF` resolves only on a device where `nepi_app_obstacles` (from
+`first_robotics`) is installed, because that app's CMakeLists is what drops
+`connect_obstacles_if.py` into `nepi_api`. Without it this node fails at import.
+
+**Status.** `rbx_connected`, `targets_connected` and `obstacles_connected`
+come from each connect's `check_connection()`; `selected_obstacles_namespace`
+reports the obstacles selection, because no `ConnectIFStatus` carries it.
+
+**Image viewer.** The RUI page keeps the 75 / 2 / 23 split. The targets
+connect's `ConnectIFStatus` names no image topic, so the viewer does not follow
+it. Instead the page keeps its earlier selection pattern with the camera picked
+locally: a Camera Select over the IDX device namespaces in `ros.idxDevices`,
+then the Data Product Select (`<selected_topic>/<data_product>`), and
+`findImageTopic()` resolving the image topic from `imageTopics`.
+`Nepi_IF_ImageViewer` renders only once a camera is selected. The selection is
+page-local and not persisted. (The connected targets process's own
+`TargetsStatus.process_status.image_pub_topics` does name its annotated image
+topics; following that is a possible later change.)

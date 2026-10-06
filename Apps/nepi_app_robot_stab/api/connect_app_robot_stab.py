@@ -49,7 +49,7 @@
 
 import time
 
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, String
 
 from nepi_app_robot_stab.msg import NepiAppRobotStabStatus
 from nepi_interfaces.msg import ControlsStatus, UpdateControl
@@ -117,6 +117,12 @@ class ConnectAppRobotStab:
                 'namespace': self.namespace,
                 'topic': 'trigger_action',
                 'msg': Empty,
+                'qsize': 1
+            },
+            'set_obstacles_namespace': {
+                'namespace': self.namespace,
+                'topic': 'set_obstacles_namespace',
+                'msg': String,
                 'qsize': 1
             },
             'save_config': {
@@ -253,6 +259,14 @@ class ConnectAppRobotStab:
         reach the same method.
         """
         self.con_node_if.publish_pub('trigger_action', Empty())
+
+    def set_obstacles_namespace(self, namespace):
+        """Point the app's obstacles connect at an obstacles app namespace.
+
+        Args:
+            namespace (str): The obstacles app namespace, or 'None' to disconnect.
+        """
+        self.con_node_if.publish_pub('set_obstacles_namespace', String(data=str(namespace)))
 
     def save_config(self):
         self.con_node_if.publish_pub('save_config', Empty())

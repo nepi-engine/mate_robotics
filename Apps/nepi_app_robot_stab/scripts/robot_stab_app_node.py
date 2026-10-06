@@ -25,8 +25,9 @@
 #      NodeClassIF creates every ROS interface and the standard
 #      save_config / reset_config / factory_reset_config topics.
 #   3. Mount a ControlsIF holding everything an operator adjusts from the RUI.
-#   4. Construct the five device connects (servo, light, motor, NPX, camera),
-#      one selector row each in the RUI.
+#   4. Construct the three connects (RBX robot, Targets, Obstacles), one
+#      selector row each in the RUI. The RBX row is meant to select the RBX
+#      device nepi_app_custom_robot publishes.
 #   5. initCb(), start the work and status timers, spin().
 #
 # This node never touches rospy. rospy lives only in nepi_sdk/nepi_ros.py; use
@@ -76,7 +77,7 @@
 
 import time
 
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, String
 
 from nepi_app_robot_stab.msg import NepiAppRobotStabStatus
 
@@ -87,11 +88,13 @@ from nepi_api.node_if import NodeClassIF
 from nepi_api.messages_if import MsgIF
 from nepi_api.system_if import ControlsIF
 
-from nepi_api.connect_device_if_svx import ConnectSVXDeviceIF
-from nepi_api.connect_device_if_lsx import ConnectLSXDeviceIF
-from nepi_api.connect_device_if_motor import ConnectMotorsDeviceIF
-from nepi_api.connect_device_if_npx import ConnectNPXDeviceIF
-from nepi_api.connect_device_if_idx import ConnectIDXDeviceIF
+from nepi_api.connect_device_if_rbx import ConnectRBXDeviceIF
+from nepi_api.connect_process_if_targets import ConnectProcessIFTargets
+# nepi_app_obstacles' CMakeLists installs its api/*.py flat into nepi_api, so
+# at runtime ConnectObstaclesIF sits beside the two above despite living in
+# that app. RUNTIME DEPENDENCY: this import fails, and the node with it, on a
+# device without nepi_app_obstacles (first_robotics) installed.
+from nepi_api.connect_obstacles_if import ConnectObstaclesIF
 
 
 #########################################
@@ -106,6 +109,11 @@ MAX_VALUE = 100.0
 
 STATUS_PUBLISH_RATE_HZ = 1.0
 UPDATE_RATE_HZ = 1.0
+
+# Unselected state of the obstacles app selector. The RUI sends this string when
+# the operator picks the blank entry, and it is what the node reports back on
+# status while nothing is connected.
+NONE_NAMESPACE = "None"
 
 
 #########################################
@@ -215,14 +223,19 @@ class NepiRobotStabApp(object):
     controls_if = None
     controls_routes = dict()
 
-    # Device connects. Each owns one RUI selector row end to end: discovery,
-    # its persisted selection, <node>/<connect_name>/select_topic and
-    # <node>/<connect_name>/status. None until setupConnects() runs.
-    svx_connect_if = None
-    lsx_connect_if = None
-    motor_connect_if = None
-    npx_connect_if = None
-    idx_connect_if = None
+    # RBX and Targets connects. Each owns one RUI selector row end to end:
+    # discovery, its persisted selection, <node>/<connect_name>/select_topic
+    # and <node>/<connect_name>/status. None until setupConnects() runs.
+    rbx_connect_if = None
+    targets_connect_if = None
+
+    # Obstacles connect path. ConnectObstaclesIF is not a ConnectNodeIF: it has
+    # no selector or auto-discovery of its own, so the operator picks an
+    # obstacles app namespace in the RUI and connectObstacles() builds the IF
+    # against it. obstacles_namespace is the current selection, reported back
+    # on status.
+    obstacles_if = None
+    obstacles_namespace = NONE_NAMESPACE
 
     DEFAULT_NODE_NAME = "app_robot_stab"
 
@@ -302,6 +315,16 @@ class NepiRobotStabApp(object):
                 'qsize': 10,
                 'callback': self.triggerActionCb,
                 'callback_args': ()
+            },
+            # The obstacles row's selection. Registered unconditionally; a
+            # 'None' selection is a disconnect.
+            'set_obstacles_namespace': {
+                'namespace': self.node_namespace,
+                'topic': 'set_obstacles_namespace',
+                'msg': String,
+                'qsize': 10,
+                'callback': self.setObstaclesNamespaceCb,
+                'callback_args': ()
             }
         }
 
@@ -323,8 +346,8 @@ class NepiRobotStabApp(object):
         self.setupControls()
 
         ##############################
-        # Device connects. After ControlsIF and before the explicit initCb, so
-        # the first status publish after init already carries their state.
+        # Connects. After ControlsIF and before the explicit initCb, so the
+        # first status publish after init already carries their state.
         self.setupConnects()
 
         ##############################
@@ -454,67 +477,77 @@ class NepiRobotStabApp(object):
     ### Device Connects
 
     def setupConnects(self):
-        # Constructed once, unconditionally, with no namespace argument -- each
-        # one discovers its own candidates and restores its own persisted
-        # selection under <node>/<connect_name>. The default connect names
-        # (svx_connect, lsx_connect, motor_connect, npx_connect, idx_connect)
-        # are already unique, so none is overridden. Selector only: device
-        # controls and data are not rendered by this app.
+        # The RBX and Targets connects are constructed once, unconditionally,
+        # with no namespace argument -- each discovers its own candidates and
+        # restores its own persisted selection under <node>/<connect_name>.
+        # The default connect names (rbx_connect, targets_connect) are already
+        # unique, so neither is overridden. Selector only: device controls and
+        # data are not rendered by this app.
         #
         # No node_if: each builds and owns its own, for the same registry-key
         # reason ControlsIF does (see the header of this file).
         #
-        # One SVX device is ONE single-axis servo. A consumer that drives more
-        # than one servo needs one ConnectSVXDeviceIF per servo, each with a
-        # distinct connect_name and auto_select_enabled=False -- left on, every
-        # interface grabs the first discovered servo and they all land on the
-        # same channel.
-        self.svx_connect_if = ConnectSVXDeviceIF(
+        # The RBX row is meant to select the RBX device nepi_app_custom_robot
+        # hosts at <custom_robot_app>/rbx.
+        self.rbx_connect_if = ConnectRBXDeviceIF(
                                     show_selector = True,
                                     show_controls = False,
                                     show_data = False,
                                     msg_if = self.msg_if,
                                     )
 
-        self.lsx_connect_if = ConnectLSXDeviceIF(
+        # Same construction as the WPILib IF app's targets connect.
+        self.targets_connect_if = ConnectProcessIFTargets(
                                     show_selector = True,
                                     show_controls = False,
                                     show_data = False,
                                     msg_if = self.msg_if,
                                     )
 
-        # ConnectMotorsDeviceIF and ConnectIDXDeviceIF take no
-        # auto_select_enabled argument -- passing one raises TypeError.
-        self.motor_connect_if = ConnectMotorsDeviceIF(
-                                    show_selector = True,
-                                    show_controls = False,
-                                    show_data = False,
-                                    msg_if = self.msg_if,
-                                    )
-
-        self.npx_connect_if = ConnectNPXDeviceIF(
-                                    show_selector = True,
-                                    show_controls = False,
-                                    show_data = False,
-                                    msg_if = self.msg_if,
-                                    )
-
-        # The IDX selected_topic is the device's '<device>/idx' namespace; the
-        # RUI image viewer resolves <selected_topic>/<data_product> beneath it.
-        self.idx_connect_if = ConnectIDXDeviceIF(
-                                    show_selector = True,
-                                    show_controls = False,
-                                    show_data = False,
-                                    msg_if = self.msg_if,
-                                    )
-
-        for name, connect_if in [('servo', self.svx_connect_if),
-                                  ('light', self.lsx_connect_if),
-                                  ('motor', self.motor_connect_if),
-                                  ('npx', self.npx_connect_if),
-                                  ('idx', self.idx_connect_if)]:
+        for name, connect_if in [('rbx', self.rbx_connect_if),
+                                  ('targets', self.targets_connect_if)]:
             if connect_if.wait_for_ready(timeout = 10) != True:
                 self.msg_if.pub_warn("RobotStab App: connect IF did not become ready: " + str(name))
+
+        # The obstacles connect is not built here: it is built on demand by
+        # connectObstacles() against the namespace the operator picks, and
+        # starts disconnected.
+
+    # Point the obstacles connect path at an obstacles app namespace, or tear it
+    # down. Called from setObstaclesNamespaceCb with whatever the RUI selector
+    # sent. The previous IF is always unregistered first, so a selection change
+    # does not leave the old instance's publishers and subscribers registered.
+    # An empty or 'None' selection is a disconnect: nothing is constructed and
+    # the node is left in a valid state with no obstacles connection.
+    #
+    # ConnectObstaclesIF only advertises against the namespace -- it does not
+    # require the app to be live -- but construction is guarded anyway so a
+    # stale or mistyped namespace cannot take the node down.
+    def connectObstacles(self, namespace):
+        if self.obstacles_if is not None:
+            try:
+                self.obstacles_if.unregister()
+            except Exception as e:
+                self.msg_if.pub_warn("RobotStab App: failed to unregister obstacles connect: " + str(e))
+            self.obstacles_if = None
+
+        if namespace is None or namespace == "" or namespace == NONE_NAMESPACE:
+            self.obstacles_namespace = NONE_NAMESPACE
+            self.msg_if.pub_info("Obstacles connection cleared")
+            return
+
+        self.obstacles_namespace = namespace
+        try:
+            # ConnectObstaclesIF is the obstacles app's own class, not a
+            # ConnectNodeIF, so it takes namespace/dataCB rather than
+            # connect_namespace/results_callback.
+            self.obstacles_if = ConnectObstaclesIF(
+                            namespace = namespace,
+                            dataCB = None)
+        except Exception as e:
+            self.obstacles_if = None
+            self.msg_if.pub_warn("RobotStab App: failed to connect obstacles app at " +
+                                 str(namespace) + ": " + str(e))
 
     def checkConnection(self, connect_if):
         # None until setupConnects() runs: initCb publishes status once from
@@ -553,6 +586,16 @@ class NepiRobotStabApp(object):
         if value > MAX_VALUE:
             value = MAX_VALUE
         self.value = value
+
+    def setObstaclesNamespaceCb(self, msg):
+        # Change-gated. The RUI may resend its current selection, and acting on
+        # every message would tear down and rebuild the same connection each
+        # time -- and log it each time.
+        namespace = str(msg.data)
+        if namespace == str(self.obstacles_namespace):
+            return
+        self.connectObstacles(namespace)
+        self.publish_status()
 
     def triggerActionCb(self, msg):
         # Topic path into the one-shot action.
@@ -625,11 +668,10 @@ class NepiRobotStabApp(object):
         status_msg.options = self.options
         status_msg.selected_option = self.selected_option
         status_msg.value = self.value
-        status_msg.servo_connected = self.checkConnection(self.svx_connect_if)
-        status_msg.light_connected = self.checkConnection(self.lsx_connect_if)
-        status_msg.motor_connected = self.checkConnection(self.motor_connect_if)
-        status_msg.npx_connected = self.checkConnection(self.npx_connect_if)
-        status_msg.idx_connected = self.checkConnection(self.idx_connect_if)
+        status_msg.rbx_connected = self.checkConnection(self.rbx_connect_if)
+        status_msg.targets_connected = self.checkConnection(self.targets_connect_if)
+        status_msg.obstacles_connected = self.checkConnection(self.obstacles_if)
+        status_msg.selected_obstacles_namespace = self.obstacles_namespace
         if self.node_if is not None:
             self.node_if.publish_pub('status_pub', status_msg)
 
@@ -646,8 +688,7 @@ class NepiRobotStabApp(object):
             except Exception:
                 pass
             self.controls_if = None
-        for connect_name in ['svx_connect_if', 'lsx_connect_if', 'motor_connect_if',
-                             'npx_connect_if', 'idx_connect_if']:
+        for connect_name in ['rbx_connect_if', 'targets_connect_if', 'obstacles_if']:
             connect_if = getattr(self, connect_name)
             if connect_if is not None:
                 try:
