@@ -92,9 +92,14 @@ from nepi_api.connect_device_if_rbx import ConnectRBXDeviceIF
 from nepi_api.connect_process_if_targets import ConnectProcessIFTargets
 # nepi_app_obstacles' CMakeLists installs its api/*.py flat into nepi_api, so
 # at runtime ConnectObstaclesIF sits beside the two above despite living in
-# that app. RUNTIME DEPENDENCY: this import fails, and the node with it, on a
-# device without nepi_app_obstacles (first_robotics) installed.
-from nepi_api.connect_obstacles_if import ConnectObstaclesIF
+# that app. OPTIONAL DEPENDENCY: on a device without nepi_app_obstacles
+# (first_robotics) installed the module does not exist, so the import is
+# guarded and the node runs with the obstacles connection unavailable rather
+# than dying at startup.
+try:
+    from nepi_api.connect_obstacles_if import ConnectObstaclesIF
+except ImportError:
+    ConnectObstaclesIF = None
 
 
 #########################################
@@ -534,6 +539,12 @@ class NepiRobotStabApp(object):
         if namespace is None or namespace == "" or namespace == NONE_NAMESPACE:
             self.obstacles_namespace = NONE_NAMESPACE
             self.msg_if.pub_info("Obstacles connection cleared")
+            return
+
+        if ConnectObstaclesIF is None:
+            self.obstacles_namespace = NONE_NAMESPACE
+            self.msg_if.pub_warn("RobotStab App: cannot connect obstacles app at " + str(namespace) +
+                                 ": nepi_app_obstacles is not installed on this device", throttle_s = 5.0)
             return
 
         self.obstacles_namespace = namespace

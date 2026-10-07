@@ -450,10 +450,13 @@ unconditionally. `setObstaclesNamespaceCb` is change-gated and calls
 dataCB=None)` inside try/except, leaving `obstacles_if = None` on failure. The
 selection starts at `None` on every node start (not persisted, as in WPILib).
 
-**Runtime dependency.** `from nepi_api.connect_obstacles_if import
+**Optional dependency.** `from nepi_api.connect_obstacles_if import
 ConnectObstaclesIF` resolves only on a device where `nepi_app_obstacles` (from
 `first_robotics`) is installed, because that app's CMakeLists is what drops
-`connect_obstacles_if.py` into `nepi_api`. Without it this node fails at import.
+`connect_obstacles_if.py` into `nepi_api`. The import is guarded: without the
+obstacles app, `ConnectObstaclesIF` is `None`, the node starts normally, and
+`connectObstacles()` logs a throttled warning and leaves the selection at
+`None` instead of connecting.
 
 **Status.** `rbx_connected`, `targets_connected` and `obstacles_connected`
 come from each connect's `check_connection()`; `selected_obstacles_namespace`
