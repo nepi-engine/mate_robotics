@@ -110,7 +110,7 @@ Every app node follows this exact shape (see the template or
 
 ```python
 nepi_sdk.init_node(name=self.DEFAULT_NODE_NAME)
-self.msg_if = MsgIF(log_name=self.class_name)
+self.msg_if = MsgIF()
 
 self.CFGS_DICT   = {'init_callback': self.initCb, 'reset_callback': self.resetCb,
                     'factory_reset_callback': self.factoryResetCb,

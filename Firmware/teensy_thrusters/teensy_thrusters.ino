@@ -1,6 +1,7 @@
 // teensy_thrusters -- Teensy 4.1 pulse generator for Blue Robotics Basic ESCs
+// and hobby servos
 //
-// Implements PROTOCOL.md (protocol 1.0) in this folder. Read that first; this
+// Implements PROTOCOL.md (protocol 1.1) in this folder. Read that first; this
 // file follows its section numbers in comments.
 //
 // Build: Arduino IDE + Teensyduino, Board "Teensy 4.1", USB Type "Serial",
@@ -21,6 +22,13 @@
 //   * NOT covered: a hang of this firmware. PWM hardware keeps outputting the
 //     last duty value if loop() stops running. The i.MX RT1062 hardware
 //     watchdog is not enabled in this version (listed follow-up).
+//
+// SERVOS (PROTOCOL.md 4.1 and 6.7-6.11): four servo channels on their own
+// QuadTimer groups, so the servo frame rate never touches the thruster rate.
+// Servos are off (pin LOW, no pulses) from boot until the host commands one.
+// Servo commands never feed the thruster watchdog, and the thruster watchdog
+// never moves a servo: a servo holds its last pulse until told otherwise. On
+// DTR falling, servos hold or go limp per the SC host_loss setting.
 
 #include <Arduino.h>
 
@@ -28,8 +36,8 @@
 // Identity (PROTOCOL.md 6.1 and 11)
 // ---------------------------------------------------------------------------
 static const char FIRMWARE_NAME[] = "teensy_thrusters";
-static const char PROTOCOL_VERSION[] = "1.0";
-static const char FIRMWARE_VERSION[] = "1.0.0";
+static const char PROTOCOL_VERSION[] = "1.1";
+static const char FIRMWARE_VERSION[] = "1.1.0";
 
 // ---------------------------------------------------------------------------
 // Channel and pin map (PROTOCOL.md 4)
@@ -37,8 +45,12 @@ static const char FIRMWARE_VERSION[] = "1.0.0";
 static const uint8_t THRUSTER_COUNT = 8;
 //                                               ch: 0  1  2  3  4  5   6   7
 static const uint8_t THRUSTER_PINS[THRUSTER_COUNT] = {2, 3, 4, 5, 6, 9, 22, 23};
-static const uint8_t SERVO_CHANNEL = 8;   // reserved; not driven in 1.0
-static const uint8_t SERVO_PIN = 10;      // QuadTimer1.0, held LOW
+// ID <servo_channel>: index of the first servo channel when thruster and
+// servo channels are counted together. Servo commands number servos 0-3.
+static const uint8_t SERVO_CHANNEL = THRUSTER_COUNT;
+static const uint8_t SERVO_COUNT = 4;
+//                                         servo: 0   1   2   3
+static const uint8_t SERVO_PINS[SERVO_COUNT] = {10, 11, 12, 14};  // QuadTimer1.0, 1.2, 1.1, 3.2
 static const uint8_t LED_PIN = 13;
 
 // ---------------------------------------------------------------------------
@@ -59,6 +71,14 @@ static const uint8_t DEFAULT_MASK = 0xFF;
 static const uint32_t DEFAULT_MIN_US = 1100;
 static const uint32_t DEFAULT_STOP_US = 1500;
 static const uint32_t DEFAULT_MAX_US = 1900;
+
+// Servo limits and boot defaults (PROTOCOL.md 5.1)
+static const uint32_t SERVO_HARD_MIN_US = 500;
+static const uint32_t SERVO_HARD_MAX_US = 2500;
+static const uint32_t SERVO_ALLOWED_RATES_HZ[] = {50, 100, 200, 333};
+static const uint32_t SERVO_DEFAULT_RATE_HZ = 50;
+static const uint32_t SERVO_DEFAULT_MIN_US = 1000;
+static const uint32_t SERVO_DEFAULT_MAX_US = 2000;
 
 // ---------------------------------------------------------------------------
 // Framing (PROTOCOL.md 3)
@@ -96,6 +116,16 @@ static uint32_t rx_errors = 0;
 // Pulse width each thruster channel is outputting; 0 = inactive (held LOW).
 static uint32_t out_us[THRUSTER_COUNT];
 
+// Servo configuration (PROTOCOL.md 5.1). One frame rate for every servo
+// group; per-servo pulse limits; what servos do when DTR falls.
+static uint32_t servo_rate_hz = SERVO_DEFAULT_RATE_HZ;
+static bool servo_hold_on_host_loss = true;
+static uint32_t servo_min_us[SERVO_COUNT];
+static uint32_t servo_max_us[SERVO_COUNT];
+static bool servo_cfg_received = false;   // SV <scfg>: 0 after a reboot
+// Pulse width each servo is outputting; 0 = off (held LOW, servo limp).
+static uint32_t servo_out_us[SERVO_COUNT];
+
 // Receive line buffer: the characters after '$'.
 static char rx_buf[MAX_AFTER_DOLLAR + 1];
 static size_t rx_len = 0;
@@ -107,13 +137,17 @@ static bool rx_bad_char = false;
 // Pulse output
 // ---------------------------------------------------------------------------
 
-// 16-bit duty for a pulse width at the configured frame rate (PROTOCOL.md 4).
-static uint32_t dutyForPulse(uint32_t pulse_us) {
-  uint64_t duty = ((uint64_t)pulse_us * cfg.rate_hz * 65536ULL + 500000ULL) / 1000000ULL;
+// 16-bit duty for a pulse width at a frame rate (PROTOCOL.md 4).
+static uint32_t dutyForPulseAt(uint32_t pulse_us, uint32_t rate_hz) {
+  uint64_t duty = ((uint64_t)pulse_us * rate_hz * 65536ULL + 500000ULL) / 1000000ULL;
   if (duty > 65535ULL) {
-    duty = 65535ULL;  // unreachable: CF enforces max_us <= period - guard
+    duty = 65535ULL;  // unreachable: CF/SC/SL enforce max_us <= period - guard
   }
   return (uint32_t)duty;
+}
+
+static uint32_t dutyForPulse(uint32_t pulse_us) {
+  return dutyForPulseAt(pulse_us, cfg.rate_hz);
 }
 
 static bool channelActive(uint8_t ch) {
@@ -149,6 +183,42 @@ static void applyFrameRate() {
   for (uint8_t ch = 0; ch < THRUSTER_COUNT; ch++) {
     analogWriteFrequency(THRUSTER_PINS[ch], (float)cfg.rate_hz);
   }
+}
+
+// Drive one servo. pulse_us == 0 means off: the pin is a GPIO held LOW and
+// the servo goes limp.
+static void writeServo(uint8_t n, uint32_t pulse_us) {
+  uint8_t pin = SERVO_PINS[n];
+  if (pulse_us == 0) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+  } else {
+    analogWrite(pin, dutyForPulseAt(pulse_us, servo_rate_hz));
+  }
+  servo_out_us[n] = pulse_us;
+}
+
+static void servosOff() {
+  for (uint8_t n = 0; n < SERVO_COUNT; n++) {
+    writeServo(n, 0);
+  }
+}
+
+// Program every servo timer group to servo_rate_hz. Each servo pin is on its
+// own QuadTimer channel, none shared with a thruster.
+static void applyServoFrameRate() {
+  for (uint8_t n = 0; n < SERVO_COUNT; n++) {
+    analogWriteFrequency(SERVO_PINS[n], (float)servo_rate_hz);
+  }
+}
+
+static bool servoRateAllowed(uint32_t rate_hz) {
+  for (size_t i = 0; i < sizeof(SERVO_ALLOWED_RATES_HZ) / sizeof(SERVO_ALLOWED_RATES_HZ[0]); i++) {
+    if (SERVO_ALLOWED_RATES_HZ[i] == rate_hz) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,10 +323,12 @@ static void handleId(size_t nfields) {
   if (serial < 10000000) {
     serial = serial * 10;
   }
+  // <servo_count> is appended last (protocol 1.1), so a 1.0 host that reads
+  // only the first seven fields still parses this reply.
   char body[96];
-  snprintf(body, sizeof(body), "ID,%s,%s,%s,%u,%u,%lu", FIRMWARE_NAME,
+  snprintf(body, sizeof(body), "ID,%s,%s,%s,%u,%u,%lu,%u", FIRMWARE_NAME,
            PROTOCOL_VERSION, FIRMWARE_VERSION, (unsigned)THRUSTER_COUNT,
-           (unsigned)SERVO_CHANNEL, (unsigned long)serial);
+           (unsigned)SERVO_CHANNEL, (unsigned long)serial, (unsigned)SERVO_COUNT);
   sendFrame(body);
 }
 
@@ -399,6 +471,164 @@ static void handleStatus(size_t nfields) {
 }
 
 // ---------------------------------------------------------------------------
+// Servo commands (PROTOCOL.md 6.7-6.11). None of them feeds the thruster
+// watchdog or changes the thruster state.
+// ---------------------------------------------------------------------------
+
+// Parse a servo index field. Replies FORMAT or RANGE and returns false if bad.
+static bool parseServoIndex(const char *field, const char *cmd, uint8_t *out) {
+  uint32_t n;
+  if (!parseUint(field, &n)) {
+    sendError("FORMAT", cmd);
+    return false;
+  }
+  if (n >= SERVO_COUNT) {
+    sendError("RANGE", cmd);
+    return false;
+  }
+  *out = (uint8_t)n;
+  return true;
+}
+
+// SC,<rate_hz>,<host_loss>: servo frame rate and DTR-loss behavior.
+static void handleServoConfigure(char **fields, size_t nfields) {
+  if (nfields != 3) {
+    sendError("FIELDS", "SC");
+    return;
+  }
+  uint32_t rate_hz;
+  if (!parseUint(fields[1], &rate_hz)) {
+    sendError("FORMAT", "SC");
+    return;
+  }
+  bool hold;
+  if (strcmp(fields[2], "HOLD") == 0) {
+    hold = true;
+  } else if (strcmp(fields[2], "LIMP") == 0) {
+    hold = false;
+  } else {
+    sendError("FORMAT", "SC");
+    return;
+  }
+  if (!servoRateAllowed(rate_hz)) {
+    sendError("RANGE", "SC");
+    return;
+  }
+  // Every servo's configured max must still fit the new frame.
+  for (uint8_t n = 0; n < SERVO_COUNT; n++) {
+    if (servo_max_us[n] + PERIOD_GUARD_US > 1000000UL / rate_hz) {
+      sendError("RANGE", "SC");
+      return;
+    }
+  }
+  bool rate_changed = (rate_hz != servo_rate_hz);
+  servo_rate_hz = rate_hz;
+  servo_hold_on_host_loss = hold;
+  if (rate_changed) {
+    applyServoFrameRate();
+    // Recompute each running servo's duty for the new rate; positions do not move.
+    for (uint8_t n = 0; n < SERVO_COUNT; n++) {
+      if (servo_out_us[n] != 0) {
+        writeServo(n, servo_out_us[n]);
+      }
+    }
+  }
+  servo_cfg_received = true;
+  sendOk("SC");
+}
+
+// SL,<n>,<min_us>,<max_us>: servo n's allowed pulse range.
+static void handleServoLimits(char **fields, size_t nfields) {
+  if (nfields != 4) {
+    sendError("FIELDS", "SL");
+    return;
+  }
+  uint8_t n;
+  if (!parseServoIndex(fields[1], "SL", &n)) {
+    return;
+  }
+  uint32_t min_us;
+  uint32_t max_us;
+  if (!parseUint(fields[2], &min_us) || !parseUint(fields[3], &max_us)) {
+    sendError("FORMAT", "SL");
+    return;
+  }
+  if (min_us < SERVO_HARD_MIN_US || max_us > SERVO_HARD_MAX_US || min_us >= max_us ||
+      max_us + PERIOD_GUARD_US > 1000000UL / servo_rate_hz) {
+    sendError("RANGE", "SL");
+    return;
+  }
+  servo_min_us[n] = min_us;
+  servo_max_us[n] = max_us;
+  // SAFETY: a servo now outside its new range goes limp rather than being
+  // moved to the nearest end -- moving it would be motion nobody commanded.
+  if (servo_out_us[n] != 0 && (servo_out_us[n] < min_us || servo_out_us[n] > max_us)) {
+    writeServo(n, 0);
+  }
+  sendOk("SL");
+}
+
+// SS,<n>,<pulse_us>: drive servo n.
+static void handleServoSet(char **fields, size_t nfields) {
+  if (nfields != 3) {
+    sendError("FIELDS", "SS");
+    return;
+  }
+  uint8_t n;
+  if (!parseServoIndex(fields[1], "SS", &n)) {
+    return;
+  }
+  uint32_t pulse_us;
+  if (!parseUint(fields[2], &pulse_us)) {
+    sendError("FORMAT", "SS");
+    return;
+  }
+  // SAFETY: rejected, never clamped.
+  if (pulse_us < servo_min_us[n] || pulse_us > servo_max_us[n]) {
+    sendError("RANGE", "SS");
+    return;
+  }
+  if (!Serial.dtr()) {
+    sendError("NO_HOST", "SS");
+    return;
+  }
+  if (servo_out_us[n] != pulse_us) {
+    writeServo(n, pulse_us);
+  }
+  sendOk("SS");
+}
+
+// SO,<n>: servo n off (limp). Accepted in every state.
+static void handleServoOff(char **fields, size_t nfields) {
+  if (nfields != 2) {
+    sendError("FIELDS", "SO");
+    return;
+  }
+  uint8_t n;
+  if (!parseServoIndex(fields[1], "SO", &n)) {
+    return;
+  }
+  writeServo(n, 0);
+  sendOk("SO");
+}
+
+// SV: servo status.
+static void handleServoStatus(size_t nfields) {
+  if (nfields != 1) {
+    sendError("FIELDS", "SV");
+    return;
+  }
+  char body[MAX_FRAME_CHARS];
+  int n = snprintf(body, sizeof(body), "SV,%u,%lu,%s", servo_cfg_received ? 1u : 0u,
+                   (unsigned long)servo_rate_hz, servo_hold_on_host_loss ? "HOLD" : "LIMP");
+  for (uint8_t s = 0; s < SERVO_COUNT && n > 0 && (size_t)n < sizeof(body); s++) {
+    n += snprintf(body + n, sizeof(body) - n, ",%lu,%lu,%lu", (unsigned long)servo_out_us[s],
+                  (unsigned long)servo_min_us[s], (unsigned long)servo_max_us[s]);
+  }
+  sendFrame(body);
+}
+
+// ---------------------------------------------------------------------------
 // Frame handling (PROTOCOL.md 3 and 7)
 // ---------------------------------------------------------------------------
 
@@ -476,6 +706,16 @@ static void handleFrame(char *s, size_t len) {
     handleConfigure(fields, nfields);
   } else if (strcmp(cmd, "ST") == 0) {
     handleStatus(nfields);
+  } else if (strcmp(cmd, "SC") == 0) {
+    handleServoConfigure(fields, nfields);
+  } else if (strcmp(cmd, "SL") == 0) {
+    handleServoLimits(fields, nfields);
+  } else if (strcmp(cmd, "SS") == 0) {
+    handleServoSet(fields, nfields);
+  } else if (strcmp(cmd, "SO") == 0) {
+    handleServoOff(fields, nfields);
+  } else if (strcmp(cmd, "SV") == 0) {
+    handleServoStatus(nfields);
   } else {
     sendError("UNKNOWN", cmd);
   }
@@ -530,9 +770,14 @@ static void checkHost() {
   bool dtr = Serial.dtr();
   if (dtr_prev && !dtr) {
     // SAFETY: host closed the port or died -> stop everything at once rather
-    // than waiting out the watchdog.
+    // than waiting out the watchdog. DTR falls only when the LAST host
+    // process closes the port (several NEPI nodes share it).
     stopAllChannels();
     state = STATE_IDLE;
+    // Servos hold by default (a gripper keeps its grip); LIMP releases them.
+    if (!servo_hold_on_host_loss) {
+      servosOff();
+    }
   }
   dtr_prev = dtr;
 }
@@ -580,9 +825,13 @@ void setup() {
   }
   stopAllChannels();
 
-  // Reserved servo channel: driven LOW, no pulses (PROTOCOL.md 4).
-  pinMode(SERVO_PIN, OUTPUT);
-  digitalWrite(SERVO_PIN, LOW);
+  // Servos: off (LOW, no pulses) until the host commands one (PROTOCOL.md 4.1).
+  for (uint8_t n = 0; n < SERVO_COUNT; n++) {
+    servo_min_us[n] = SERVO_DEFAULT_MIN_US;
+    servo_max_us[n] = SERVO_DEFAULT_MAX_US;
+  }
+  applyServoFrameRate();
+  servosOff();
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);

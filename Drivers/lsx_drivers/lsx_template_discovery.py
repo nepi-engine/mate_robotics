@@ -82,8 +82,7 @@ class LsxTemplateDiscovery:
     def __init__(self):
         # CALL-model discovery uses a lightweight logger, NOT MsgIF, and never
         # calls init_node()/spin() -- it is instantiated inside drivers_mgr.
-        self.log_name = PKG_NAME.lower() + "_discovery"
-        self.logger = nepi_sdk.logger(log_name=self.log_name)
+        self.logger = nepi_sdk.logger()
         self.logger.log_info("Starting Initialization")
         self.logger.log_info("Initialization Complete")
 

@@ -24,9 +24,15 @@
 # device_info_dict, exit-on-link-loss), but this node registers a
 # MotorsDeviceIF -- one motor per thruster -- not an SVXActuatorIF. It lives in
 # svx_drivers only because deploy_nepi_drivers.sh installs category folders.
-# No SettingsIF and no SVX servo channel yet; both are recorded follow-ups.
 # MotorsDeviceIF takes no settings functions, so every configuration choice is
 # a driver OPTION, resolved by discovery into DEVICE_DICT['thruster_config'].
+#
+# SHARED PORT: the board's servos are separate nodes
+# (svx_teensy_thrusters_servo_node.py, one per servo) on the same serial port.
+# Every transaction holds an advisory flock on the port and only accepts the
+# reply that names the command it sent (PROTOCOL.md 2.1). This node exiting
+# does not drop DTR while a servo node still holds the port, so the Teensy
+# watchdog -- not DTR -- is what stops the thrusters in that case.
 #
 # COMMAND SEMANTICS (from connect_device_if_motor.py, the consumer side):
 #   set_speed(ratio)      ratio 0.0 (off) to 1.0 (max). A non-zero ratio runs
@@ -61,9 +67,16 @@
 import copy
 import functools
 import math
+import os
 import threading
 
 import serial
+
+try:
+    import fcntl  # Linux advisory locking so the board's nodes can share one port
+    HAVE_FCNTL = True
+except Exception:
+    HAVE_FCNTL = False
 
 from nepi_sdk import nepi_sdk
 from nepi_sdk import nepi_utils
@@ -139,7 +152,7 @@ class SvxTeensyThrustersNode:
 
         ##############################
         # Create Msg Class
-        self.msg_if = MsgIF(log_name = self.class_name)
+        self.msg_if = MsgIF()
         self.msg_if.pub_info("Starting Node Initialization Processes")
 
         # serial_lock serializes transactions on the port (keepalive timer,
@@ -416,7 +429,12 @@ class SvxTeensyThrustersNode:
                     motor['pulse_us'] = self.stop_us
                 values[self.thruster_channels[i]] = motor['pulse_us']
 
-        reply = self.transact('SA,' + ','.join(str(v) for v in values))
+        # During an arm hold the Teensy refuses SA (ER,ARMING) and counts each
+        # refusal in rx_errors, so skip SA until the ST poll shows the hold has
+        # ended. The watchdog runs only in RUN, so this cannot trip it.
+        reply = None
+        if self.teensy_state != 'ARMING':
+            reply = self.transact('SA,' + ','.join(str(v) for v in values))
         if reply is not None:
             if reply[:2] == ['ER', 'ARMING']:
                 self.teensy_state = 'ARMING'
@@ -475,11 +493,11 @@ class SvxTeensyThrustersNode:
 
     def connect(self):
         try:
-            # exclusive: discovery's probe can never open this port while the
-            # node holds it.
-            self.serial_port = serial.Serial(self.port_str, self.SERIAL_BAUD,
-                                             timeout = self.REPLY_TIMEOUT_SEC,
-                                             write_timeout = 0.5, exclusive = True)
+            # Not exclusive: pySerial's exclusive holds the port's flock for the
+            # whole open, which would lock out the board's servo nodes. Each
+            # transaction takes the flock instead (PROTOCOL.md 2.1), and
+            # discovery never probes a board while any of its nodes runs.
+            self.serial_port = openSharedPort(self.port_str, self.SERIAL_BAUD, self.REPLY_TIMEOUT_SEC)
         except Exception as e:
             self.msg_if.pub_warn("Failed to open serial port at: " + str(self.port_str) + " (" + str(e) + ")")
             self.serial_port = None
@@ -557,15 +575,22 @@ class SvxTeensyThrustersNode:
 
     def transact(self, body, connecting = False):
         # Send one frame and return the reply's fields, or None. The protocol is
-        # strictly request/reply, so the input buffer is flushed first and the
-        # first well-formed frame back is the reply.
+        # strictly request/reply. The in-process lock and the cross-process
+        # flock together make this the only transaction on the port; the input
+        # buffer is flushed first, and a reply that does not name this command
+        # (a late reply to another node's timed-out request) is skipped.
         reply = None
         link_error = None
+        cmd = body[:2]
         with self.serial_lock:
             port = self.serial_port
             if port is None:
                 return None
+            locked = False
             try:
+                if HAVE_FCNTL:
+                    fcntl.flock(port.fileno(), fcntl.LOCK_EX)
+                    locked = True
                 port.reset_input_buffer()
                 port.write(encodeFrame(body))
                 port.flush()
@@ -573,9 +598,17 @@ class SvxTeensyThrustersNode:
                 while reply is None and nepi_utils.get_time() < deadline:
                     line = port.readline()
                     if line is not None and len(line) > 0:
-                        reply = decodeFrame(line)
+                        fields = decodeFrame(line)
+                        if replyMatches(cmd, fields):
+                            reply = fields
             except Exception as e:
                 link_error = e
+            finally:
+                if locked:
+                    try:
+                        fcntl.flock(port.fileno(), fcntl.LOCK_UN)
+                    except Exception:
+                        pass
 
         if link_error is None and reply is not None:
             self.missed_replies = 0
@@ -634,10 +667,39 @@ class SvxTeensyThrustersNode:
 
 
 ##########################
-# Protocol helpers (PROTOCOL.md 3). Identical copy of the discovery's
-# encodeFrame/decodeFrame -- drivers install flat into one folder and the
-# discovery runs inside drivers_mgr, so the two files share no module. Keep the
-# copies in step.
+# Protocol helpers (PROTOCOL.md 3 and 2.1). encodeFrame/decodeFrame are an
+# identical copy of the discovery's, and replyMatches of the servo node's --
+# drivers install flat into one folder and the discovery runs inside
+# drivers_mgr, so the files share no module. Keep the copies in step.
+
+def openSharedPort(path, baud, timeout):
+    # Open the board's port while holding its flock (PROTOCOL.md 2.1).
+    # pySerial's open() flushes the tty input queue, which every process with
+    # the port open shares, so an unlocked open can throw away the reply
+    # another node is waiting for. The lock is taken on a short-lived second
+    # descriptor because the Serial object's own descriptor does not exist
+    # until open() is already running.
+    lock_fd = None
+    try:
+        if HAVE_FCNTL:
+            lock_fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return serial.Serial(path, baud, timeout = timeout, write_timeout = 0.5)
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)   # closing the descriptor releases its flock
+
+
+def replyMatches(cmd, fields):
+    # True if fields is the reply to command cmd: $OK,<cmd>, $ER,<code>,<cmd>,
+    # or a reply that carries the command's own name (ID, ST, SV).
+    if fields is None:
+        return False
+    if fields[0] == 'OK':
+        return len(fields) >= 2 and fields[1] == cmd
+    if fields[0] == 'ER':
+        return len(fields) >= 3 and fields[2] == cmd
+    return fields[0] == cmd
 
 def frameChecksum(body):
     return functools.reduce(lambda acc, c: acc ^ ord(c), body, 0)

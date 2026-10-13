@@ -278,7 +278,6 @@ self.image_if = ColorImageIF(namespace=self.node_namespace,
                              data_source_description='file',
                              data_ref_description='source',
                              perspective='pov',
-                             log_name=data_product,
                              msg_if=self.msg_if)
 ready = self.image_if.wait_for_ready()
 

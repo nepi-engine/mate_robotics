@@ -1,7 +1,7 @@
 driver:
   pkg_name: SVX_TEENSY_THRUSTERS
-  display_name: Teensy Thrusters (Blue Robotics ESC)
-  description: Thruster driver for a PJRC Teensy 4.1 running the teensy_thrusters firmware (mate_robotics Firmware/teensy_thrusters), which generates the servo pulses for Blue Robotics Basic ESCs, each driving one T200 thruster. One node per Teensy, found over USB serial and confirmed by the firmware's identify reply; it registers a motors device with one motor per thruster. The ESCs and thrusters report nothing back, so motor status shows commanded values only. Lives in svx_drivers because deploy_nepi_drivers.sh installs category folders, but registers a MotorsDeviceIF, not an SVX servo.
+  display_name: Teensy Thrusters and Servos (Blue Robotics ESC)
+  description: Driver for a PJRC Teensy 4.1 running the teensy_thrusters firmware (mate_robotics Firmware/teensy_thrusters), which generates the pulses for Blue Robotics Basic ESCs, each driving one T200 thruster, and for up to four hobby servos. Each Teensy is found over USB serial and confirmed by the firmware's identify reply. The devices option picks the parts, the way the ZED driver's data_products option does. Thrusters are one motors device with one motor per thruster. Servos get one SVX servo device per servo, each with its own calibration in its Device Settings panel. Nothing reports back (ESCs, thrusters and servos are all one-way), so status shows commanded values only.
   type: SVX
   group_id: None
   NODE_DICT:
@@ -15,6 +15,41 @@ driver:
     class_name: SvxTeensyThrustersDiscovery
     process: CALL
     OPTIONS:
+      devices:
+        type: Selection
+        description: 'Which parts of each Teensy NEPI drives. thrusters: one motors device for the ESCs (the options from esc_model to custom_deadband_us). servos: servo_count servo devices. thrusters,servos: both. A part that is not selected gets no node: deselected thrusters stay at the stop pulse the firmware outputs from boot, and deselected servos stay off (limp). Servos need firmware protocol 1.1 or later. Changing this starts or stops only the parts that changed.'
+        options:
+          - 'thrusters'
+          - 'servos'
+          - 'thrusters,servos'
+        default: 'thrusters,servos'
+        value: 'thrusters,servos'
+      servo_count:
+        type: Int
+        description: 'Servos only: how many servos are wired, 1-4. Default 1. Servos take the servo pins in order: servo 0 on pin 10, servo 1 on 11, servo 2 on 12, servo 3 on 14 (Firmware/teensy_thrusters/PROTOCOL.md section 4). One servo device is launched per servo; nothing can detect whether a servo is plugged in, so set this to what is actually wired. Each servo is calibrated in its own Device Settings panel (pulse widths and degree range), because those describe the servo, not the board. Raising or lowering it starts or stops only the servos that changed.'
+        options:
+          - '1'
+          - '4'
+        default: '1'
+        value: '1'
+      servo_rate_hz:
+        type: Selection
+        description: 'Servos only: pulse frame rate on every servo pin. Default 50 Hz, which every hobby servo accepts; the Axon MAX MK2 works at 50 Hz (Docs/svx/axon_max_mk2_servo.md). Higher rates suit only digital servos rated for them, such as the DS3235 (50-330 Hz). Servo pins are on their own timers, so this never changes the thruster rate. Changing it restarts every servo node.'
+        options:
+          - '50'
+          - '100'
+          - '200'
+          - '333'
+        default: '50'
+        value: '50'
+      servo_on_host_loss:
+        type: Selection
+        description: 'Servos only: what servos do when NEPI stops talking to the Teensy (every node closed the port) or a servo node shuts down. hold, the default, keeps each servo at its last position, so a gripper keeps its grip. limp stops the pulses, so the servo stops resisting and can be moved by hand. Servos are never on the thruster watchdog: a thruster timeout does not move them either way.'
+        options:
+          - 'hold'
+          - 'limp'
+        default: 'hold'
+        value: 'hold'
       esc_model:
         type: Selection
         description: 'Which ESC is on every thruster channel; it sets the pulse widths. BlueRobotics Basic ESC (BESC30-R3), the default, fixes 1100 us full reverse, 1500 us stop, 1900 us full forward and a 25 us deadband either side of stop -- the documented values, not the ESC''s internal 1112/1512/1912 (Docs/Motors/bluerobotics_basic_esc.md). Custom uses custom_pulse_min_us, custom_pulse_stop_us, custom_pulse_max_us and custom_deadband_us instead. Changing this restarts the thruster node, which re-runs the arming hold.'
