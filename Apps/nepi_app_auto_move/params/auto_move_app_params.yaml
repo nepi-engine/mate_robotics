@@ -1,0 +1,15 @@
+APP_DICT:
+  display_name: Auto Move
+  description: Click a point in an image to move the robot there
+  pkg_name: nepi_app_auto_move
+  group_name: AUTOMATION
+  config_file: app_auto_move.yaml
+  app_file: auto_move_app_node.py
+  node_name: app_auto_move
+  license_type: 3-clause BSD
+  license_link: https://opensource.org/licenses/BSD-3-Clause
+RUI_DICT:
+  rui_files:
+  - NepiAppAutoMove.js
+  rui_main_file: NepiAppAutoMove.js
+  rui_main_class: NepiAppAutoMove
