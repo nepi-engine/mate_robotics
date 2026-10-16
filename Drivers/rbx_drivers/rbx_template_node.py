@@ -123,7 +123,7 @@ class RbxTemplateNode:
         self.base_namespace = nepi_sdk.get_base_namespace()
         self.node_name = nepi_sdk.get_node_name()
         self.node_namespace = nepi_sdk.get_node_namespace()
-        self.msg_if = MsgIF(log_name=self.class_name)
+        self.msg_if = MsgIF()
         self.msg_if.pub_info("Starting Node Initialization Processes")
 
         try:

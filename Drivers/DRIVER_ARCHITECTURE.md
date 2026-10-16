@@ -109,7 +109,7 @@ its own process.
 ```python
 class MyDiscovery:
     def __init__(self):                      # no init_node(), no spin()!
-        self.logger = nepi_sdk.logger(log_name=...)
+        self.logger = nepi_sdk.logger()
 
     def discoveryFunction(self, available_paths_list, active_paths_list,
                           base_namespace, drv_dict, retry_enabled=True):

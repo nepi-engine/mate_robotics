@@ -1,0 +1,152 @@
+driver:
+  pkg_name: SVX_TEENSY_THRUSTERS
+  display_name: Teensy Thrusters and Servos (Blue Robotics ESC)
+  description: Driver for a PJRC Teensy 4.1 running the teensy_thrusters firmware (mate_robotics Firmware/teensy_thrusters), which generates the pulses for Blue Robotics Basic ESCs, each driving one T200 thruster, and for up to four hobby servos. Each Teensy is found over USB serial and confirmed by the firmware's identify reply. The devices option picks the parts, the way the ZED driver's data_products option does. Thrusters are one motors device with one motor per thruster. Servos get one SVX servo device per servo, each with its own calibration in its Device Settings panel. Nothing reports back (ESCs, thrusters and servos are all one-way), so status shows commanded values only.
+  type: SVX
+  group_id: None
+  NODE_DICT:
+    file_name: svx_teensy_thrusters_node.py
+    class_name: SvxTeensyThrustersNode
+  DRIVER_DICT:
+    file_name: None
+    class_name: None
+  DISCOVERY_DICT:
+    file_name: svx_teensy_thrusters_discovery.py
+    class_name: SvxTeensyThrustersDiscovery
+    process: CALL
+    OPTIONS:
+      devices:
+        type: Selection
+        description: 'Which parts of each Teensy NEPI drives. thrusters: one motors device for the ESCs (the options from esc_model to custom_deadband_us). servos: servo_count servo devices. thrusters,servos: both. A part that is not selected gets no node: deselected thrusters stay at the stop pulse the firmware outputs from boot, and deselected servos stay off (limp). Servos need firmware protocol 1.1 or later. Changing this starts or stops only the parts that changed.'
+        options:
+          - 'thrusters'
+          - 'servos'
+          - 'thrusters,servos'
+        default: 'thrusters,servos'
+        value: 'thrusters,servos'
+      servo_count:
+        type: Int
+        description: 'Servos only: how many servos are wired, 1-4. Default 1. Servos take the servo pins in order: servo 0 on pin 10, servo 1 on 11, servo 2 on 12, servo 3 on 14 (Firmware/teensy_thrusters/PROTOCOL.md section 4). One servo device is launched per servo; nothing can detect whether a servo is plugged in, so set this to what is actually wired. Each servo is calibrated in its own Device Settings panel (pulse widths and degree range), because those describe the servo, not the board. Raising or lowering it starts or stops only the servos that changed.'
+        options:
+          - '1'
+          - '4'
+        default: '1'
+        value: '1'
+      servo_rate_hz:
+        type: Selection
+        description: 'Servos only: pulse frame rate on every servo pin. Default 50 Hz, which every hobby servo accepts; the Axon MAX MK2 works at 50 Hz (Docs/svx/axon_max_mk2_servo.md). Higher rates suit only digital servos rated for them, such as the DS3235 (50-330 Hz). Servo pins are on their own timers, so this never changes the thruster rate. Changing it restarts every servo node.'
+        options:
+          - '50'
+          - '100'
+          - '200'
+          - '333'
+        default: '50'
+        value: '50'
+      servo_on_host_loss:
+        type: Selection
+        description: 'Servos only: what servos do when NEPI stops talking to the Teensy (every node closed the port) or a servo node shuts down. hold, the default, keeps each servo at its last position, so a gripper keeps its grip. limp stops the pulses, so the servo stops resisting and can be moved by hand. Servos are never on the thruster watchdog: a thruster timeout does not move them either way.'
+        options:
+          - 'hold'
+          - 'limp'
+        default: 'hold'
+        value: 'hold'
+      esc_model:
+        type: Selection
+        description: 'Which ESC is on every thruster channel; it sets the pulse widths. BlueRobotics Basic ESC (BESC30-R3), the default, fixes 1100 us full reverse, 1500 us stop, 1900 us full forward and a 25 us deadband either side of stop -- the documented values, not the ESC''s internal 1112/1512/1912 (Docs/Motors/bluerobotics_basic_esc.md). Custom uses custom_pulse_min_us, custom_pulse_stop_us, custom_pulse_max_us and custom_deadband_us instead. Changing this restarts the thruster node, which re-runs the arming hold.'
+        options:
+          - 'BlueRobotics Basic ESC (BESC30-R3)'
+          - 'Custom'
+        default: 'BlueRobotics Basic ESC (BESC30-R3)'
+        value: 'BlueRobotics Basic ESC (BESC30-R3)'
+      thruster_model:
+        type: Selection
+        description: 'Which thruster each ESC drives. Recorded in the device info and the logs only; it does not change the pulse math, which esc_model sets. Default BlueRobotics T200 (R2). Two T200 facts the driver cannot enforce because nothing reports back: it must not run dry for more than 10 s, and its thrust depends on supply voltage and is weaker in reverse (Docs/Motors/bluerobotics_t200_thruster.md). Bench-test in water.'
+        options:
+          - 'BlueRobotics T200 (R2)'
+          - 'Custom'
+        default: 'BlueRobotics T200 (R2)'
+        value: 'BlueRobotics T200 (R2)'
+      thruster_channels:
+        type: 'String'
+        description: 'Which Teensy channels carry thrusters, in thruster order: comma-separated channel numbers 0-7, e.g. "0,1,2,3,4,5". The first entry becomes motor_0, the second motor_1, and so on. Channel n is a fixed Teensy pin (0:2, 1:3, 2:4, 3:5, 4:6, 5:9, 6:22, 7:23; see Firmware/teensy_thrusters/PROTOCOL.md section 4). Default "0,1,2,3,4,5". A channel not listed outputs no pulses at all, so an ESC on it never arms. The ESCs cannot be detected (they send nothing back), so this list is the only record of what is wired; an invalid list (out of range, repeated, unparseable) launches nothing and logs why.'
+        default: '0,1,2,3,4,5'
+        value: '0,1,2,3,4,5'
+      reversed_thrusters:
+        type: 'String'
+        description: 'Motor indexes (not channels) whose command is mirrored about the stop pulse, comma-separated, e.g. "1,4" reverses motor_1 and motor_4. Default empty. Use it when a thruster pushes the wrong way because of its propeller handedness or how its three phase wires were connected; mirroring in software is the documented alternative to swapping two motor wires (Docs/Motors/bluerobotics_t200_thruster.md).'
+        default: ''
+        value: ''
+      max_thrust_ratio:
+        type: Float
+        description: 'Cap applied to every thruster''s speed ratio before it becomes a pulse, 0.0-1.0. Default 1.0 (no cap). This is the tool for staying under the vehicle''s current limit: a T200 at full throttle draws about 32 A at 20 V (Docs/Motors/bluerobotics_t200_thruster.md), so several at once can exceed a tether or fuse budget. Current is not linear in pulse width, so check the T200 current table for the cap that fits your budget and supply voltage.'
+        options:
+          - '0.0'
+          - '1.0'
+        default: '1.0'
+        value: '1.0'
+      pulse_rate_hz:
+        type: Selection
+        description: 'Pulse frame rate on every thruster channel. Default 200 Hz: the ESC accepts up to 400 Hz and Blue Robotics "generally use a 200Hz update rate, and don''t recommend below 50Hz" (Docs/Motors/bluerobotics_basic_esc.md). All six thruster timer groups on the Teensy are set to this one rate.'
+        options:
+          - '50'
+          - '100'
+          - '200'
+          - '400'
+        default: '200'
+        value: '200'
+      watchdog_ms:
+        type: Int
+        description: 'Teensy command watchdog, 50-1000 ms. Default 200. If no thrust command reaches the Teensy for this long, it puts every thruster at stop and keeps it there until a new command arrives. It is the only stop when the Pi or this node dies: the Teensy never stops pulsing, so the ESC''s own roughly 0.3 s signal-loss stop never fires (Docs/Motors/bluerobotics_basic_esc.md). The node refreshes the Teensy every watchdog_ms / 4 (between 20 and 100 ms). Values below about 100 ms risk false trips from host scheduling delays.'
+        options:
+          - '50'
+          - '1000'
+        default: '200'
+        value: '200'
+      arming_hold_s:
+        type: Int
+        description: 'How long every thruster is held at stop when the node starts or the Teensy reboots, 2-15 s; thrust commands are refused meanwhile. Default 7. The ESC will not drive until it has seen the stop pulse for a few seconds after power-up, and Blue Robotics'' own example holds it for 7 s (Docs/Motors/bluerobotics_basic_esc.md). Listen for the ESC''s second tone, which means it has seen stop.'
+        options:
+          - '2'
+          - '15'
+        default: '7'
+        value: '7'
+      command_timeout_s:
+        type: Float
+        description: 'Per-thruster command timeout in the node, 0.1-10 s. Default 1.0. If no motor command addressed to a thruster (by its name or "all") arrives for this long while it is running, the node stops that thruster. MotorsDeviceIF has no keepalive of its own, so whatever drives the thrusters must keep sending commands at least this often; a single GO from the RUI therefore runs for this long and then stops. Separate from watchdog_ms, which protects against the node itself dying.'
+        options:
+          - '0.1'
+          - '10.0'
+        default: '1.0'
+        value: '1.0'
+      custom_pulse_min_us:
+        type: Int
+        description: 'Custom esc_model only: full-reverse pulse width, 800-2200 us. Default 1100 (the Basic ESC value). Must be below custom_pulse_stop_us.'
+        options:
+          - '800'
+          - '2200'
+        default: '1100'
+        value: '1100'
+      custom_pulse_stop_us:
+        type: Int
+        description: 'Custom esc_model only: stop pulse width, 800-2200 us. Default 1500 (the Basic ESC value). The Teensy outputs 1500 us from boot until the node configures it, so an ESC whose stop is not 1500 us is not held at stop during that window.'
+        options:
+          - '800'
+          - '2200'
+        default: '1500'
+        value: '1500'
+      custom_pulse_max_us:
+        type: Int
+        description: 'Custom esc_model only: full-forward pulse width, 800-2200 us. Default 1900 (the Basic ESC value). Must be above custom_pulse_stop_us. The firmware''s 800-2200 us limit sits inside the 900-2235 us window the BLHeli_S firmware treats as valid (Docs/Motors/bluerobotics_basic_esc.md).'
+        options:
+          - '800'
+          - '2200'
+        default: '1900'
+        value: '1900'
+      custom_deadband_us:
+        type: Int
+        description: 'Custom esc_model only: half-width of the ESC deadband around stop, 0-200 us. Default 25 (the Basic ESC deadband is 1500 +/- 25 us). The smallest non-zero command is placed just outside it, so a small command always moves the thruster instead of sitting in the deadband.'
+        options:
+          - '0'
+          - '200'
+        default: '25'
+        value: '25'

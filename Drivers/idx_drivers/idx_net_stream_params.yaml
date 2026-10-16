@@ -1,0 +1,37 @@
+driver:
+  pkg_name: IDX_NET_STREAM
+  display_name: Network Stream Camera
+  description: Driver package for network video streams (RTSP or HTTP) received as NEPI cameras
+  type: IDX
+  group_id: None
+  NODE_DICT:
+    file_name: idx_net_stream_node.py
+    class_name: NetStreamCamNode
+  DRIVER_DICT:
+    file_name: idx_net_stream_driver.py
+    class_name: NetStreamCamDriver
+  DISCOVERY_DICT:
+    file_name: idx_net_stream_discovery.py
+    class_name: NetStreamCamDiscovery
+    process: LAUNCH
+    OPTIONS:
+      # Comma-separated list of stream URLs. Discovery launches one camera node
+      # per URL once a probe of that URL returns a frame, and keeps re-probing
+      # unreachable URLs, so a stream source powered on after NEPI still appears.
+      # Accepted forms:
+      #   rtsp://host[:port]/path     RTSP, always pulled over TCP (default port 554)
+      #   rtsps://host[:port]/path    RTSP over TLS (default port 322)
+      #   http://host[:port]/path     HTTP stream, e.g. MJPEG (default port 80)
+      #   https://host[:port]/path    HTTP stream over TLS (default port 443)
+      # Credentials may be given as scheme://user:pass@host/...; the password is
+      # never logged or published. Plain UDP and raw RTP/SDP are not supported.
+      # Example: rtsp://192.168.2.2:8554/cam1, http://192.168.2.2:8080/stream
+      # Enter none to clear the list.
+      stream_urls:
+        type: String
+        default: ''
+      data_products:
+        type: Selection
+        options:
+          - 'color_image'
+        default: 'color_image'

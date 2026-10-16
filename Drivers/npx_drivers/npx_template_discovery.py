@@ -49,8 +49,7 @@ class NpxTemplateDiscovery:
 
     ##########################################################################
     def __init__(self):
-        self.log_name = PKG_NAME.lower() + "_discovery"
-        self.logger = nepi_sdk.logger(log_name=self.log_name)
+        self.logger = nepi_sdk.logger()
         self.logger.log_info("Starting Initialization")
         self.logger.log_info("Initialization Complete")
 
