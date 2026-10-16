@@ -91,7 +91,7 @@ APP_NAME=$(basename "$APP_FOLDER")
 # Deploy Nepi App
 ###############################################
 SOURCE_PATH=$APP_FOLDER
-DEST_PATH="/mnt/nepi_storage/nepi_src/nepi_engine_ws/src/nepi_src/nepi_apps/${APP_NAME}"
+DEST_PATH="/mnt/nepi_storage/nepi_src/nepi_engine_ws/src/nepi_apps/${APP_NAME}"
 
 RSYNC_EXCLUDES=" --exclude .git --exclude .gitmodules"
 #echo "Excluding ${RSYNC_EXCLUDES}"
