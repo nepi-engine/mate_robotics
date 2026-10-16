@@ -794,7 +794,57 @@ class AutoMoveImgPub:
             info_dict['pub_latency_time'] = (nepi_utils.get_time() - use_timestamp)
             info_dict['process_time'] = (nepi_utils.get_time() - start_time)
 
+
+def overlay_attitude(cv2_img, x_px, y_px, color_rgb=(0, 255, 0), size_ratio = 0.5, thickness_ratio = 0.5, size=None, thickness=None,  text_list = [], text_ratio = 0.5):
+    """Draws a crosshair on an image at a given (x_px, y_px) position."""
+    # Draw vertical line
+    # if size is None or thickness is None:
+    #     size, thickness  = get_optimal_font_dims(cv2_img,font_scale = 2e-3, thickness_scale = 1.5e-3)
+    shape = cv2_img.shape
+    h=shape[0]
+    w=shape[1]  
+    hw_min = min(h,w)
+    hw_size = math.ceil((0.05 * hw_min))  
+    hw_thickness = math.ceil((0.004 * hw_min))
+    if size is None:
+       size = hw_size
+
+    if thickness is None:
+       thickness = hw_thickness
+    size_ratio = nepi_utils.check_ratio(size_ratio)
+    size = int(size / 3 + size * (size_ratio * 1.5) )
+    thickness = int(thickness * (thickness_ratio * 2))
+    if size < 5:
+       size = 5
+    if thickness < 1:
+       thickness = 1 
+    
+    # Draw vetical lines
+    color_bgr = (color_rgb[2],color_rgb[1],color_rgb[0])
+    cv2.line(cv2_img, (x_px, y_px + size), (x_px, y_px + 2 * size), color_bgr, thickness)
+    cv2.line(cv2_img, (x_px, y_px - size), (x_px, y_px - 2 * size), color_bgr, thickness)
+    # Draw horizontal lines
+    cv2.line(cv2_img, (x_px + size, y_px), (x_px + 2 * size, y_px), color_bgr, thickness)
+    cv2.line(cv2_img, (x_px - size, y_px), (x_px - 2 * size, y_px), color_bgr, thickness)
+    # Draw circle
+    center_coordinates = (x_px, y_px)
+    radius = int(size + size/2)
+    cv2.circle(cv2_img, center_coordinates, radius, color_bgr, thickness)
+
+    if len(text_list) > 0:
+        x_px = x_px
+        y_padding = 0 # math.ceil((0.02 * h) + size ) 
+        y_px = y_px + y_padding
+        x_padding = math.ceil((0.02 * w) + size ) 
+        x_px = x_px + x_padding
+        cv2_img  =  nepi_img.overlay_text_list(cv2_img, text_list, x_px = x_px , y_px = y_px, color_rgb = color_rgb, size_ratio = text_ratio / 3)
+    return cv2_img
+
     def processOverlayImage(self, cv2_img, result_dict, timestamp = None, frame_id = ''):
+        img_if = self.img_node_dict.get('img_if', None) 
+        if img_if is None:
+            return
+
         info_dict = self.source_info_dict
         if info_dict is None:
             return False
@@ -839,6 +889,35 @@ class AutoMoveImgPub:
 
         if self.show_crosshair_enabled == True and self.has_click == True:
             self.applyCrosshairOverlay(overlay_img, self.click_x_ratio, self.click_y_ratio, CROSSHAIR_COLOR)
+
+ #########################
+        draw_attitude = (self.show_attitude_enabled == True)
+        if self.draw_attitude != draw_attitude:
+            overlay_img = self.overlay_attitude(overlay_img,10,10)
+
+        #########################
+        self.goal_error_degs = [10,10]
+
+        draw_crosshair = (self.show_move_enabled == True)
+        if self.draw_crosshair != draw_crosshair:
+            if draw_crosshair == True:
+                img_if.set_crosshairs_size_ratio(0.4)
+                img_if.set_crosshairs_thickness_ratio(0.4)
+                img_if.set_crosshairs_text_ratio(0.3)
+                img_if.set_overlay_crosshair_degrees(False)
+            else:
+                img_if.remove_crosshair('Center')
+                img_if.remove_crosshair('Move Goal')
+            img_if.set_crosshairs_enable(draw_crosshair)
+        self.draw_crosshair = draw_crosshair
+
+        if draw_crosshair == True:
+            [x_deg,y_deg] = copy.deepcopy(self.goal_error_degs)
+            try:
+                img_if.add_crosshair_degs(0, 0,name = 'Center', color_rgb = (0,0,127))
+                img_if.add_crosshair_degs(x_deg, y_deg,name = 'Move Goal', color_rgb = OVERLAY_CROSSHAIR_COLOR)
+            except Exception as e:
+                self.msg_if.pub_info('Draw Crosshair Failed: ' + str([x_deg,y_deg]) + " with exception: " + str(e), throttle_s = 5)
 
         self.publishImgData(overlay_img,
                             width_deg = width_deg,
