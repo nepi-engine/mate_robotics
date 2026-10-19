@@ -346,10 +346,22 @@ These are questions, not corrections. You know your robot better than we do.
 ## 9. Open Questions for the Team
 
 1. Which firmware and Pi script are installed on the robot today? (Section 8, note 1)
+   - **Partly answered** (Victoria Zhang, 2026-10-16): the firmware is `mcu/modes/tuning/tuning.ino`. `power_thrusters()` is commented out in the repo because the public repo is an earlier version than what is on the Teensy.
+   - Still open: which Pi and topside scripts run with it. No Pi script in the public repo sends the 313-byte frame the repo's `tuning.ino` reads. See [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md), "What the Team's Code Says", D1 and V1.
 2. Which free static address on 192.168.68.0/24, outside any DHCP range, can NEPI use?
+   - **Answered** (Victoria Zhang, 2026-10-16): 192.168.68.23. See [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md), P0 and P8.
 3. Is RB free for assist, or would you prefer another button?
+   - **Answered** (Victoria Zhang, 2026-10-16): RB is free. For testing stabilization she would prefer a hotkey on the computer itself, so the toggle generalizes to other systems. See [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md), P9 and D3.
 4. Which cameras exist, which way does each face (forward or down), and which `/dev/videoN` is each? Which should NEPI use?
+   - **Partly answered** (Victoria Zhang, 2026-10-16): there are four cameras:
+     - one faces down, on the claw;
+     - one faces forward;
+     - one is on the main gripper and sees the pool floor when the claw is rotated to face the bottom;
+     - one faces down toward the back claw.
+   - Still open: each camera's `/dev/videoN` and port, and which down camera is fixed to the hull. See [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md), P3, D4, V3 and V5.
 5. What is the tether's link type and speed? Our estimate is 22 to 58 Mbit/s per camera with both copies.
+   - **Partly answered** (Victoria Zhang, 2026-10-16): camera streaming latency is about 60 ms from the control Pi to the topside computer.
+   - Still open: the tether's link type and bandwidth. See [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md), P3, P8 and V2.
 6. Which operating system does the topside laptop run, which controller model do you use, and do the triggers report 0 to 255 or 0 to 1023?
 7. Are you comfortable with the Pi change (`nepi_link.py` plus about five lines)? If not, we will plan the laptop-side merge instead.
 8. Would you like the systemd units?
