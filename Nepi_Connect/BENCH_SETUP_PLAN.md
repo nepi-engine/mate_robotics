@@ -54,7 +54,7 @@ These findings shape the whole plan. They come from reading the code, not from a
    - **Never enable `power_thrusters()` in the repo's `tuning.ino` and run it with a repo Pi script.**
 2. **The only self-consistent trio in the repo** is `topside/modes/main.py` + `rpi/modes/main.py` + `mcu/modes/new_ctl/new_ctl.ino` (Pair M). `new_ctl.ino` reads exactly the 154-byte frame (`new_ctl.ino:130-149, 325-362`).
 3. **The two script pairs do not mix.** `topside/modes/main.py` sends only changed controller events (`topside/modes/main.py:37-48`). `topside/modes/tuning.py` sends 20 gains first (`topside/modes/tuning.py:63-79`). Each Pi script crashes on the other pair's message, at `rpi/modes/tuning.py:76` or `rpi/modes/main.py:71`.
-4. **The Teensy will not start without its sensors.** Both sketches loop forever in `setup()` until a Bar02 depth sensor and a BNO085 IMU answer on I2C (`tuning.ino:244-273`, `new_ctl.ino:227-256`). The thruster pins are attached only after that (`tuning.ino:285-292`).
+4. **The Teensy will not start without its sensors.** Both sketches loop forever in `setup()` until a Bar02 depth sensor and a BNO085 IMU answer on I2C (`tuning.ino:244-273`, `new_ctl.ino:227-256`). The thruster pins are attached only after that (`tuning.ino:285-292`). The P6 bench copy of `new_ctl.ino` skips both sensors (D2).
 5. **Nothing stops a thruster when the link drops.** The Teensy keeps its last frame (`tuning.ino:342-379`). The Pi keeps resending its last frame when the topside drops (`rpi/modes/main.py:61-64, 84-88`). Ctrl+C on either script does not stop a spinning thruster. The bench supply's output switch does.
 
 ## Bench Diagram
@@ -77,7 +77,7 @@ These findings shape the whole plan. They come from reading the code, not from a
                                   $RPCTL frame every 0.1 s
                                   $TNCTL lines back
                                         |
-                                  TEENSY 4.1 (team sketch, see D1)
+                                  TEENSY 4.1 (bench copy of new_ctl.ino, D1)
                                    I2C Wire SDA 18 / SCL 19:
                                      Bar02 0x76, BNO085 0x4A
                                    pins VFL 8  VFR 4  VBL 7  VBR 3
@@ -85,7 +85,7 @@ These findings shape the whole plan. They come from reading the code, not from a
                                         |  servo pulses 1100-1900 us
                                   8 x Basic ESC --> 8 x T200 (in water)
                                         |
-                                  BENCH SUPPLY 12 V (ASSUMED), current-limited
+                                  BENCH SUPPLY 12 V, current-limited (1.5 A, then 5 A, 2026-10-21)
 ```
 
 Sources for the diagram: addresses `topside/modes/main.py:9`, `quick_stream.sh:1`, Victoria Zhang 2026-10-16 (A3); TCP `topside/modes/main.py:10, 14-20, 37-52`; Pi `rpi/modes/main.py:13, 75-88`; video `quick_stream.sh:1`, `quick_render.sh:1`; Teensy pins `tuning.ino:47-54`; I2C `Docs/tbd/pjrc_teensy_4_1.md:46`, `MS5837/MS5837.cpp:4`, `Docs/README.md:49`; NEPI ports LINK_PROTOCOL "Addresses and Ports".
@@ -105,7 +105,7 @@ Sources for the diagram: addresses `topside/modes/main.py:9`, `quick_stream.sh:1
 | Video copy to NEPI, camera N | UDP, Pi :5610+N to NEPI :5600+N, 1 send round | LINK_PROTOCOL "Video to NEPI" |
 | Status to NEPI | UDP JSON, to NEPI :5700, 10 Hz | LINK_PROTOCOL |
 | Demand from NEPI | UDP JSON, to Pi :5701, 10 Hz | LINK_PROTOCOL |
-| Teensy serial | `/dev/ttyACM0`, 115200 (the Teensy ignores the baud rate on USB) | `rpi/modes/main.py:13, 23`; `Docs/tbd/pjrc_teensy_4_1.md:62` |
+| Teensy serial | `/dev/ttyACM0`, 115200 (the Teensy ignores the baud rate on USB). It appears only after the first flash; a fresh board shows as port `usb1/1-1` (P5) | `rpi/modes/main.py:13, 23`; `Docs/tbd/pjrc_teensy_4_1.md:62`; bench 2026-10-21 |
 | Frame to the Teensy | every 0.1 s | `rpi/modes/main.py:84-88` |
 | Line back to the topside | every 0.2 s | `rpi/modes/main.py:75-82` |
 
@@ -114,8 +114,39 @@ Sources for the diagram: addresses `topside/modes/main.py:9`, `quick_stream.sh:1
 | When | Steps | Result at the end |
 |---|---|---|
 | Today, 2026-10-19 (no Teensy) | P0, P1, P2, P3, P4 (optional); the "today" parts of P5 and P6; send the questions to Victoria; optionally the address part of P8 | Network up. Controller events reach the Pi. Video renders on the laptop with measured latency. Both sketches compile on the control Pi. Supply, tank and wiring ready. |
-| Teensy day, 2026-10-20 | P5, P6, P7 | Firmware running with sensors. One thruster, then all eight, driven from the controller. Acceptance checklist passed. |
+| Teensy day, planned 2026-10-20, held 2026-10-21 | P5, P6, P7 | Planned: firmware running with sensors, one thruster then all eight driven from the controller, acceptance checklist passed. Held: every pin spun one T200 through one ESC, and the trio drove it from the controller on pins 3 and 9, with no sensors (Bench Log). |
 | Later | P8, P9 | NEPI watching the video and status. Then the stabilization toggle through the control Pi. |
+
+## Bench Log, 2026-10-21
+
+The Teensy day results. "Passed" was seen on the bench. "Computed" comes from the team's code or tables, not from a measurement. Each line points to the step that holds the detail.
+
+**Passed.**
+- arduino-cli 1.5.1 and `teensy:avr` 1.62.0 installed on the control Pi, after adding `~/.local/bin` to PATH (P5).
+- Adafruit BNO08x 1.2.7 (with Unified Sensor 1.1.15 and BusIO 1.17.4) and BlueRobotics MS5837 Library 1.1.1 installed. The repo's `MS5837/` folder does not compile (P5).
+- A fresh Teensy 4.1 flashed from the control Pi with `-p usb1/1-1`, without the program button. `/dev/ttyACM0` appeared after the first flash (P5).
+- The bench Pi runs Python 3.13. `nmea_encode` was rebuilt in place with the P1 command (P1).
+- The Basic ESC armed with three rising tones, then one tone, then one more (P6).
+- `esc_all.ino` spun one T200 through one ESC from each of pins 2 to 9 (P6).
+- The bench copy of `new_ctl.ino` (power on, triggers 1023 and 40, no sensors, `delay(5)`) compiled, flashed and sent `$TNCTL` about 4 times a second (P6).
+- The laptop script ran on the laptop's system Python 3.8.10, without a venv (P2).
+- End to end: controller, laptop script, Pi script, Teensy, ESC and T200. RY moved the thruster on pin 3 (VBR); LY, LX and the triggers moved it on pin 9 (HFL) (P7).
+- Slow mode: full LY gave 100 on values 5 to 8 (P7).
+- Holding LY full and pushing RY past about 50% cut HFL from 1700 to 1651 µs, seen as a slight slowdown (P6, V11).
+- Ctrl+C on the scripts leaves the Teensy on its last command, so the supply goes off first at shutdown (P7).
+
+**Computed, not measured.**
+- 1.5 A per thruster is reached at about 1648 µs forward and 1352 µs reverse; 5 A at about 1735 and 1265 µs (P6).
+- Any single input over its whole range stays at or under about 4.8 A on one thruster (P6).
+- LY, LX and a trigger together can drive one horizontal thruster to about 1890 µs, about 17 A (P6).
+- `limit_current()` makes thrust non-monotonic in RY and trigger travel past about 60% (V11).
+
+**Still open.**
+- The physical push direction for LY up, LX right, LT and RY up (P7).
+- The heading-hold sign, which needs the IMU (P7).
+- The depth and IMU checks of P5 and P7, which need the Bar02 and the BNO085 (D2).
+- All eight ESCs and thrusters at once: only one ESC and one T200 were on the bench (P6).
+- Where the startup tones on a USB unplug come from (P6).
 
 ## Plan Steps
 
@@ -186,7 +217,7 @@ ping -c 5 192.168.68.12 && ping -c 5 192.168.68.23
 **When.** Today.
 
 **Needs.**
-- **Pi and OS.** A Raspberry Pi 5. ASSUMED: the bench Pi at `raspberrypi.local` (10.0.0.116), which already has a rov-26 checkout and FastMJPG built, and runs an exploreHD camera at 640x480 MJPEG 30 fps (F5). It runs 64-bit Raspberry Pi OS with Python 3.11; ASSUMED, because the committed C extension is `nmea_encode.cpython-311-aarch64-linux-gnu.so` (`rpi/modes/nmea_encode_c_ext/`).
+- **Pi and OS.** A Raspberry Pi 5. ASSUMED: the bench Pi at `raspberrypi.local` (10.0.0.116), which already has a rov-26 checkout and FastMJPG built, and runs an exploreHD camera at 640x480 MJPEG 30 fps (F5). It runs 64-bit Raspberry Pi OS with Python 3.13 (bench, 2026-10-21). The committed C extension is built for 3.11 (`nmea_encode.cpython-311-aarch64-linux-gnu.so`, `rpi/modes/nmea_encode_c_ext/`), so on this Pi it must be rebuilt in place (Do, below).
 - **Power.** A 5 V, 5 A USB-C supply. With a 3 A supply the Pi limits all USB devices to 600 mA in total, too little for cameras plus the Teensy (`Docs/tbd/raspberry_pi_5.md:15-17, 28-30`).
 - **Cameras.** One to four USB cameras.
 
@@ -201,8 +232,8 @@ ping -c 5 192.168.68.12 && ping -c 5 192.168.68.23
 
 ```bash
 # [control Pi]
-grep VERSION_CODENAME /etc/os-release     # ASSUMED: bookworm
-python3 --version                          # 3.11.x loads the committed .so
+grep VERSION_CODENAME /etc/os-release     # ASSUMED: bookworm; the bench Pi's Python 3.13 hints at a newer release (inference)
+python3 --version                          # bench Pi: 3.13 (2026-10-21); only 3.11.x loads the committed .so
 cd ~/rov-26 && git log --oneline -1        # ASSUMED path; expect 1af4984
 sudo apt install -y python3-serial python3-dev python3-setuptools build-essential socat   # ASSUMED Debian package names
 ```
@@ -211,7 +242,8 @@ sudo apt install -y python3-serial python3-dev python3-setuptools build-essentia
 # [control Pi] test the committed C extension first
 cd ~/rov-26 && python3 -c "import sys; sys.path.insert(0,'rpi/modes'); import nmea_encode_c_ext.nmea_encode as n; print(len(n.nmea_encode(tuple([0]*18))))"
 # expect 154: 6 header + 144 data + "*XX" + one zero byte (nmea_encode.c:6-10, 82-87)
-# only if the import fails: build it in place (ASSUMED command; the committed build/ folder matches it), then test again
+# if the import fails (it does on Python 3.13): build it in place, then test again
+# this command rebuilt it on the bench Pi under Python 3.13, 2026-10-21
 cd ~/rov-26/rpi/modes/nmea_encode_c_ext && python3 setup.py build_ext --inplace
 ```
 
@@ -239,6 +271,7 @@ Today, with no Teensy, the script stops at the serial open (`rpi/modes/main.py:2
 - If another USB serial device enumerates first, the Teensy may become `/dev/ttyACM1` while the script still opens `ttyACM0`. Check `ls -l /dev/serial/by-id/` (ASSUMED).
 - An event code missing from `gamepad_map` raises `KeyError` at `rpi/modes/main.py:72`, outside any `try`, and the script exits. P2 lists the codes your controller sends.
 - When the script dies, the Teensy keeps the last frame it received (finding 5).
+- Quit miniterm (Ctrl+]) before starting the script. It holds `/dev/ttyACM0` (P5).
 - There is no reconnect. To recover, restart the laptop script, then the Pi script.
 - Do not run `Nepi_Connect/scripts/nepi_connect_setup.sh` on this Pi. Its ustreamer service would take the camera FastMJPG needs (F8).
 - `rpi/modes/tuning.py` prints on every pass of a busy loop (`:111`), and it crashes on messages from `topside/modes/main.py` (`:76`). Use it only with `topside/modes/tuning.py`.
@@ -250,8 +283,8 @@ Today, with no Teensy, the script stops at the serial open (`rpi/modes/main.py:2
 **When.** Today.
 
 **Needs.**
-- **OS.** A Linux laptop with Ethernet. ASSUMED Ubuntu. The topside OS is NOT IN CODE (ASK VICTORIA, V4), but `quick_render.sh` runs a FastMJPG binary whose only documented install is `apt-get` plus `./build` (`FastMJPG/README.md` "Install").
-- **Python.** Python 3. The repo pins 3.12.8 (`.python-version:1`). If you run `topside/modes/tuning.py`, its pinned numpy and matplotlib (`requirements.txt:4-5`) set their own minimum version (ASSUMED: 3.10).
+- **OS.** A Linux laptop with Ethernet. The bench laptop runs Ubuntu 20.04 (2026-10-21). The team's topside OS is NOT IN CODE (ASK VICTORIA, V4), but `quick_render.sh` runs a FastMJPG binary whose only documented install is `apt-get` plus `./build` (`FastMJPG/README.md` "Install").
+- **Python.** Python 3. The repo pins 3.12.8 (`.python-version:1`), but `topside/modes/main.py` runs on the bench laptop's system Python 3.8.10 (2026-10-21). If you run `topside/modes/tuning.py`, its pinned numpy and matplotlib (`requirements.txt:4-5`) set their own minimum version (ASSUMED: 3.10).
 - **Controller.** An Xbox-layout controller (button names in `rpi/modes/main.py:39-58`). The model is NOT IN CODE (V4).
 
 **Main info.**
@@ -269,20 +302,23 @@ Today, with no Teensy, the script stops at the serial open (`rpi/modes/main.py:2
   | `BTN_TL` | LB | slow mode |
 - **RB** is `BTN_TR`, slot 13 (`rpi/modes/main.py:53`). Neither sketch uses it.
 - **No keyboard.** No topside script reads the keyboard; `get_gamepad()` reads only the controller (`topside/modes/main.py:38`).
-- **Trigger range.** The two sketches disagree: `tuning.ino:28` divides by 1023 and `new_ctl.ino:28` by 255. The controller decides which is right.
+- **Trigger range.** The two sketches disagree: `tuning.ino:28` divides by 1023 and `new_ctl.ino:28` by 255. The controller decides which is right. The bench controller reports 0 to 1023 (2026-10-21), so the P6 bench copy of `new_ctl.ino` uses 1023 and a trigger dead zone of 40, the `tuning.ino` values (`tuning.ino:28, 30`).
 
 **Do.**
 
 ```bash
 # [laptop] ASSUMED: Ubuntu package names
-sudo apt install -y git python3-venv python3-tk
+sudo apt install -y git python3-tk
 git clone https://github.com/CoralCrusaders/rov-26.git ~/rov-26 && cd ~/rov-26 && git checkout 1af4984
-python3 -m venv ~/rov-venv && ~/rov-venv/bin/pip install inputs==0.5
-~/rov-venv/bin/python topside/modes/gamepadtest.py
+python3 -m pip show inputs                     # bench laptop (2026-10-21): 0.5, in the user's site packages
+python3 -m pip install --user inputs==0.5      # only if the line above finds nothing (ASSUMED: pip installed)
+python3 topside/modes/gamepadtest.py
 ```
 
+The bench laptop had `inputs` 0.5 and `tkinter` already, so the team's scripts run on the system Python. A venv is needed only where `pip --user` is not allowed. Then run `sudo apt install -y python3-venv`, `python3 -m venv ~/rov-venv && ~/rov-venv/bin/pip install inputs==0.5`, and use `~/rov-venv/bin/python` in place of `python3` in this step.
+
 Move every stick and trigger to both ends and press every button. Write down:
-- The full-pull value of LT and RT: 255 or 1023.
+- The full-pull value of LT and RT: 255 or 1023. The bench controller gives 1023 (2026-10-21).
 - The sign of `ABS_Y` with the stick pushed up, and of `ABS_X` with the stick pushed right.
 - Any code that is not in `rpi/modes/main.py:39-58`. For example, a `BTN_MODE` from the Xbox button would crash the Pi script. Do not press that input while the Pi script runs.
 
@@ -294,14 +330,14 @@ cd ~/rov-26/FastMJPG && chmod +x ./build && ./build && ./bin/FastMJPG help
 ```
 
 ```bash
-# [laptop] launch: always BEFORE the Pi script
-cd ~/rov-26 && ~/rov-venv/bin/python topside/modes/main.py
+# [laptop] launch: always BEFORE the Pi script; system Python, verified on the bench laptop 2026-10-21
+cd ~/rov-26 && python3 topside/modes/main.py
 # prints "socket created", "socket bound", "listening for connection" (topside/modes/main.py:15-19)
 # then "connection address: ('192.168.68.22', ...)" once the Pi connects (:21)
 ```
 
 **Done when.**
-- `gamepadtest.py` shows every input, and the trigger range and stick signs are recorded.
+- `gamepadtest.py` shows every input, and the trigger range and stick signs are recorded. Bench trigger range: 0 to 1023 (2026-10-21).
 - The topside script prints "listening for connection".
 - `FastMJPG help` runs.
 
@@ -421,15 +457,19 @@ The decoder must:
 
 **Needs.**
 - **Board.** The Teensy 4.1 and a USB cable to the control Pi.
-- **Sensors.** A Bar02 depth sensor and a BNO085 IMU, wired to the Teensy's I2C before the first boot (D2). ASSUMED available, since both are in the MATE kit (`Docs/README.md:15-16`).
-- **Firmware.** Chosen in D1.
+- **Sensors.** A Bar02 depth sensor and a BNO085 IMU, wired to the Teensy's I2C before the first boot (D2). Both are in the MATE kit (`Docs/README.md:15-16`), but neither was on the 2026-10-21 bench, so that bench ran the sensor-skip copy (D2, P6).
+- **Firmware.** Chosen in D1. On the 2026-10-21 bench: the P6 bench copy of `new_ctl.ino`.
 
 **Main info.**
-- **Board and flashing:** `arduino-cli compile -u -b teensy:avr:teensy41 -p /dev/ttyACM0 <sketch>.ino` (`mcu/modes/tuning/upload.sh:1`, `mcu/modes/new_ctl/upload.sh:1`). The team flashes from a Linux machine with the Teensy on `/dev/ttyACM0`, most likely the control Pi (inference; D7).
+- **Board and flashing.** The team's command is `arduino-cli compile -u -b teensy:avr:teensy41 -p /dev/ttyACM0 <sketch>.ino` (`mcu/modes/tuning/upload.sh:1`, `mcu/modes/new_ctl/upload.sh:1`). It fails on a fresh board.
+  - A new Teensy 4.1 runs PJRC's factory blink sketch as USB RawHID. `lsusb` shows `16c0:0486 Teensyduino RawHID`, and `/dev/ttyACM0` does not exist until a sketch with USB serial is flashed (bench, 2026-10-21).
+  - `arduino-cli board list` shows the board as port `usb1/1-1`, protocol `teensy`, Teensy 4.1. The port name depends on the USB socket, so always take it from that list.
+  - What worked every time on the bench: `arduino-cli compile -u -b teensy:avr:teensy41 -p usb1/1-1 .`, run inside the sketch folder. The program button was not needed. After the first flash, `/dev/ttyACM0` appears.
+  - Flashing from the control Pi worked (D7, resolved for the bench).
 - **Libraries.**
   - `Servo` and `Wire` come with the Teensy core (`tuning.ino:7, 9`).
-  - The Adafruit BNO08x library is installed separately (`tuning.ino:10`).
-  - `MS5837` is the repo's `MS5837/` folder (`tuning.ino:11`). `upload.sh` passes no library path, so the team must have installed it as a library (ASSUMED).
+  - The Adafruit BNO08x library is installed separately (`tuning.ino:10`). The library manager installed 1.2.7 and pulled in Adafruit Unified Sensor 1.1.15 and Adafruit BusIO 1.17.4 (bench, 2026-10-21).
+  - `MS5837` (`tuning.ino:11`): **do not use the repo's `MS5837/` folder. It does not compile.** Its `MS5837.h` is the newer Blue Robotics version, with `init(TwoWire &wirePort = Wire)` and members `D1_pres`, `D2_temp` (`MS5837/MS5837.h:55, 96`). Its `MS5837.cpp` is the older version, with `init()` and members `D1`, `D2` (`MS5837/MS5837.cpp:24, 75-78`). The compiler stops with "no declaration matches 'bool MS5837::init()'" and "'D1' was not declared in this scope". Install "BlueRobotics MS5837 Library" from the library manager instead (1.1.1 on the bench). The team probably builds against that install (V6).
 - **Sensor wiring and addresses.**
   - Teensy `Wire` uses SDA 18 and SCL 19 (`Docs/tbd/pjrc_teensy_4_1.md:46`), at 400 kHz (`tuning.ino:279-280`).
   - The Bar02 is at 0x76 (`MS5837/MS5837.cpp:4`). It needs 3.3 V logic and has no pull-ups (`Docs/npx/bluerobotics_bar_depth_sensor.md:27, 46, 51-53`).
@@ -441,14 +481,20 @@ The decoder must:
 **Do (today).**
 
 ```bash
-# [control Pi] ASSUMED: arduino-cli install script and PJRC board index URL, per their vendors' docs
+# [control Pi] arduino-cli install script and PJRC board index URL, per their vendors' docs; verified 2026-10-21
 curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/.local/bin sh
+# the installer warns that ~/.local/bin is not on PATH in this shell; fix it for now and for new shells
+echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc
+export PATH=$HOME/.local/bin:$PATH
 arduino-cli config init
 arduino-cli config add board_manager.additional_urls https://www.pjrc.com/teensy/package_teensy_index.json
-arduino-cli core update-index && arduino-cli core install teensy:avr
-arduino-cli lib install "Adafruit BNO08x"
-mkdir -p ~/Arduino/libraries && cp -r ~/rov-26/MS5837 ~/Arduino/libraries/
+arduino-cli core update-index && arduino-cli core install teensy:avr   # bench: arduino-cli 1.5.1, teensy:avr 1.62.0
+arduino-cli lib install "Adafruit BNO08x"                 # bench: 1.2.7, plus Unified Sensor 1.1.15, BusIO 1.17.4
+rm -rf ~/Arduino/libraries/MS5837                         # only if an earlier try copied the repo's MS5837 folder there
+arduino-cli lib install "BlueRobotics MS5837 Library"     # bench: 1.1.1; never the repo's MS5837/ folder
 ```
+
+The core install brought teensy-tools 1.62.0 and teensy-compile 15.2.1 with it (bench, 2026-10-21).
 
 ```bash
 # [control Pi] udev rules for the Teensy (Docs/tbd/pjrc_teensy_4_1.md:187, 194, 255)
@@ -459,36 +505,42 @@ systemctl status ModemManager --no-pager     # if running, it can interfere (Doc
 
 ```bash
 # [control Pi] compile only; no Teensy needed. Proves the toolchain and libraries.
+# the P6 bench copy of new_ctl.ino compiled on the bench Pi with the libraries above, 2026-10-21
 cd ~/rov-26/mcu/modes/new_ctl && arduino-cli compile -b teensy:avr:teensy41 new_ctl.ino
 cd ~/rov-26/mcu/modes/tuning  && arduino-cli compile -b teensy:avr:teensy41 tuning.ino
 ```
 
 **Do (Teensy day).**
-1. With the Teensy unplugged, wire the Bar02 and BNO085 to 3.3 V, GND, SDA 18 and SCL 19. Leave pins 2 to 9 empty.
-2. Stop any Pi script that holds `/dev/ttyACM0`.
-3. Plug in the Teensy and flash the D1 sketch **unmodified**, with `power_thrusters()` still commented out:
+1. With the Teensy unplugged, wire the Bar02 and BNO085 to 3.3 V, GND, SDA 18 and SCL 19. Leave pins 2 to 9 empty. With no sensors, use the P6 bench copy in step 3 instead (D2).
+2. Quit miniterm (Ctrl+]) and stop any Pi script. Either one holds `/dev/ttyACM0`.
+3. Plug in the Teensy and flash the D1 sketch **unmodified**, with `power_thrusters()` still commented out. On a bench with no sensors, flash the P6 bench copy from `~/bench_fw/new_ctl` instead; nothing is on pins 2 to 9 yet.
 
 ```bash
-# [control Pi] the same command as upload.sh:1; <sketch> is new_ctl or tuning, or Victoria's sketch
-ls -l /dev/serial/by-id/
-cd ~/rov-26/mcu/modes/<sketch> && arduino-cli compile -u -b teensy:avr:teensy41 -p /dev/ttyACM0 <sketch>.ino
-python3 -m serial.tools.miniterm /dev/ttyACM0 115200     # ASSUMED tool; expect $TNCTL lines; Ctrl+] quits
+# [control Pi] upload.sh:1 with the port from "arduino-cli board list"; verified 2026-10-21 (usb1/1-1)
+arduino-cli board list                  # fresh board: port usb1/1-1, protocol teensy, Teensy 4.1
+cd ~/rov-26/mcu/modes/<sketch> && arduino-cli compile -u -b teensy:avr:teensy41 -p usb1/1-1 .
+ls -l /dev/ttyACM0                      # appears after the first flash
+python3 -m serial.tools.miniterm /dev/ttyACM0 115200     # expect $TNCTL lines; Ctrl+] quits
 ```
 
-4. Quit miniterm. Start the laptop script (P2), then `python3 rpi/modes/main.py` (P1).
+`<sketch>` is `new_ctl` or `tuning`, or Victoria's sketch. Replace `usb1/1-1` with the port `arduino-cli board list` shows. The unmodified sketch with no sensors prints `Failed to initialize bar02` once a second and never sends `$TNCTL` (`new_ctl.ino:227-231`).
+
+4. Quit miniterm. Quitting it does not stop the sketch. Start the laptop script (P2), then `python3 rpi/modes/main.py` (P1).
 5. The Pi prints the serial port list (`rpi/modes/main.py:26-27`), then every Teensy line (`:106`).
-6. Move LY. Values 5 to 8 (the horizontal outputs) change. Turn the IMU by hand. Value 11 (`yaw_deg`) changes.
+6. Move LY. Values 5 to 8 (the horizontal outputs) change. Turn the IMU by hand. Value 11 (`yaw_deg`) changes. With no sensors, skip the IMU check.
 
 **Done when.**
-- `$TNCTL` lines reach the Pi and appear on the laptop, with no `ERR...` lines.
+- `$TNCTL` lines reach the Pi and appear on the laptop, with no `ERR...` lines. Passed on 2026-10-21 with the bench copy.
 - Each stick moves the expected outputs (P7 table).
-- `yaw_deg` follows the IMU and `depth_m` reads near 0 in air.
+- `yaw_deg` follows the IMU and `depth_m` reads near 0 in air. Not checked on 2026-10-21: no sensors.
 
 **Gotchas.**
 - `ERRTRM` lines with the repo's `tuning.ino` and a repo Pi script confirm the frame-size mismatch (finding 1). Do not go on to P6 with that pair.
-- Flashing needs the port free. Stop the Pi script first.
+- Flashing needs the port free. Quit miniterm (Ctrl+]) and stop the Pi script first, before every upload. Quitting miniterm does not stop the sketch.
 - Never open the Teensy's port at 134 baud. That reboots it into the bootloader (`Docs/tbd/pjrc_teensy_4_1.md:65`).
-- `/dev/ttyACM0` exists only while a sketch is running (`Docs/tbd/pjrc_teensy_4_1.md:138`). A brand-new Teensy may need its program button for the first upload (ASSUMED).
+- `/dev/ttyACM0` exists only while a sketch with USB serial is running (`Docs/tbd/pjrc_teensy_4_1.md:138`). A brand-new Teensy 4.1 runs the factory blink sketch as RawHID (`lsusb`: `16c0:0486 Teensyduino RawHID`), so `upload.sh`'s `-p /dev/ttyACM0` fails on it. Use the port from `arduino-cli board list`. The program button was not needed (2026-10-21).
+- The `usb1/1-1` port name depends on which USB socket the cable is in. Read it from `arduino-cli board list` after moving the cable.
+- The repo's `MS5837/` folder does not compile (Main info). If it was copied into `~/Arduino/libraries`, run `rm -rf ~/Arduino/libraries/MS5837` before installing the library-manager version, as the bench did.
 - `tuning.ino` prints a line on every loop, so the Pi terminal scrolls fast. That is normal.
 - `Starting...` (`tuning.ino:277`) is printed before the port is open, so it is usually missed.
 
@@ -499,53 +551,139 @@ python3 -m serial.tools.miniterm /dev/ttyACM0 115200     # ASSUMED tool; expect 
 **When.** Teensy day, after P5. Get the supply, tank and leads ready today.
 
 **Needs.**
-- **Supply.** A 12 V bench supply with an adjustable current limit and an output switch, with one person on that switch. 12 V is ASSUMED because the firmware's current table is for the T200 "@ 12V" (`tuning.ino:19-21`) and its comment names a 25 A fuse (`:16`). Ask the team for their real supply voltage (V7).
+- **Supply.** A 12 V bench supply with a current limit and an output switch, with one person on that switch. The 2026-10-21 bench used a 12 V 1.5 A supply, then a 12 V 5 A supply. 12 V matches the firmware's current table for the T200 "@ 12V" (`new_ctl.ino:19-21`) and its 25 A fuse comment (`:16`). The team's real supply voltage and fuse are still open (V7).
 - **Water.** A tank or bucket deep enough to cover each thruster.
 - **Wiring.** ESC signal leads to the Teensy pins, with a common ground.
-- **Firmware.** A local copy of the D1 sketch with `power_thrusters();` uncommented (`tuning.ino:690`, `new_ctl.ino:640`). Never the repo's `tuning.ino` with a repo Pi script (finding 1).
+- **Firmware.** The bench copy of `new_ctl.ino` in `~/bench_fw/new_ctl` (Do, step 1), with `power_thrusters();` uncommented (`new_ctl.ino:640`). `~/rov-26` stays unmodified. Never the repo's `tuning.ino` with a repo Pi script (finding 1).
+- **Pin check.** The bench-only sketch `~/bench_fw/esc_all/esc_all.ino` (Do, step 9).
 
 **Main info.**
 - **Pins:** VFL 8, VFR 4, VBL 7, VBR 3, HFL 9, HFR 5, HBL 6, HBR 2 (`tuning.ino:47-54`, `new_ctl.ino:50-57`). Every direction flag is +1 (`tuning.ino:56-63`).
 - **Pulse:** `1500 + power`, with power from -400 to 400, giving 1100 to 1900 µs (`tuning.ino:26, 33, 569-578`). The ESC reads 1100 as full reverse, 1500 as stop and 1900 as full forward, with a ±25 µs dead band (`Docs/Motors/bluerobotics_basic_esc.md:7-11, 24-25`).
 - **Arming.** Power the ESC with the motor connected and it plays three rising tones. It then needs a stop pulse "for a few seconds"; it plays one tone when it detects a signal and a second tone when it detects stop. Blue Robotics' example holds 7 s (`Docs/Motors/bluerobotics_basic_esc.md:113-123`).
+- **Tones on the bench (2026-10-21).**
+  - The ESC plays its three rising startup tones at supply power-up whether or not the Teensy is plugged into the Pi.
+  - Armed is three rising tones, then one tone, then one more. Three tones followed by silence means no signal reaches the ESC.
+  - It also replays the three tones when the Teensy's USB cable is unplugged from the Pi. The cause is unknown, and it is harmless.
 - **Firmware and arming.** The firmware has no arming hold. Before the first `power_thrusters()` write, the pins carry the Servo library's default pulse (NOT IN CODE; expected 1500 µs).
   - With `tuning.ino`, every gain is zero until a valid frame arrives (`tuning.ino:658-682`; `input_data` starts at zero). So all outputs are 1500 µs until the Pi script starts.
   - `new_ctl.ino` has fixed gains (`new_ctl.ino:206-214`), so its depth and heading holds act from the first loop.
 - **Current per thruster at 12 V:** 0.5 A at 1600 µs, 3.3 A at 1700, 8.9 A at 1800 and 16.9 A at 1900 (`Docs/Motors/bluerobotics_t200_thruster.md:101-111`).
-- **What the sticks ask for.** Full LY asks for 200 µs (gain 0.5, `tuning.ino:35, 483`), which is 1700 µs. The firmware caps its *estimated* total at 20 A: 10 A horizontal and 10 A vertical (`tuning.ino:16-18, 538-567`).
+- **What the sticks ask for.** Full LY asks for 200 µs (gain 0.5, `tuning.ino:35, 483`), which is 1700 µs. The firmware caps its *estimated* total at 20 A: 10 A horizontal and 10 A vertical (`tuning.ino:16-18, 538-567`). That cap scales outputs in a way that makes thrust non-monotonic in stick travel (V11).
+- **What a bench supply allows.** COMPUTED from the team's T200 current table (`AMP_LIST`, `new_ctl.ino:21`), for one thruster:
+  - 1.5 A at about 1648 µs forward and 1352 µs reverse.
+  - 5 A at about 1735 µs forward and 1265 µs reverse.
+- **Single inputs.** COMPUTED by simulating `new_ctl.ino:411-550` with the sensors reading zero and one thruster connected. Any single input over its whole range stays at or under about 4.8 A on one thruster:
+  - LY full: 1700 µs (3.3 A).
+  - LX full: 1660 or 1340 µs (1.8 A).
+  - One trigger alone: peaks near 1284 µs (3.9 A) at a 60 to 70 percent pull, then falls to 1370 µs (1.1 A) at a full pull.
+  - RY alone: peaks at 1730 µs (4.8 A) near 60 percent, then falls to 1618 µs (0.8 A) at full.
+- **Combined inputs.** COMPUTED the same way. LY, LX and a trigger together can drive one horizontal thruster to about 1890 µs, about 17 A. Even each input at half travel can reach about 14 A. Slow mode does not prevent this, because it does not scale the yaw term (`new_ctl.ino:479-498`).
+- **Bench rule.** One input at a time on any supply under 17 A. On a 1.5 A supply, also use slow mode (LB) and avoid the triggers.
 - **Dry running:** a T200 must not run more than 10 s out of water (`Docs/Motors/bluerobotics_t200_thruster.md:183`).
 - **Signal loss.** The ESC stops about 0.3 s after its pulses stop, and needs re-arming (`Docs/Motors/bluerobotics_basic_esc.md:180-189`). The Teensy keeps pulsing as long as it runs, so this only helps when the Teensy itself stops.
 
 **Do.**
-1. **One thruster.** Connect one ESC signal lead to HFL, pin 9, and its signal ground to a Teensy GND (`Docs/Motors/bluerobotics_basic_esc.md:44`). LY drives this channel directly.
-2. **Supply.** Set the supply to 12 V with a 4 A limit (ASSUMED; just above 3.3 A at 1700 µs), output off.
-3. **Thruster.** Put the thruster in water, propeller clear, hands clear.
-4. **Flash.** Flash the `power_thrusters()` build (P5 commands), with the Pi script stopped.
-5. **Arm.** Turn the supply output on. Listen for three rising tones, then one tone and a second tone. With no second tone, the ESC did not see stop.
-6. **Drive.** Start the laptop script, then the Pi script. Push LY slowly: the thruster turns, and value 5 (`hfl_pwr`) follows. Release it and the thruster stops.
-7. **Link-loss check.** Hold LY at about 30%, then stop the laptop script with Ctrl+C. Expected: the thruster **keeps turning** (finding 5). Stop it with the supply switch. Record this. Then repeat, and unplug the Teensy's USB instead: the ESC should stop within about 0.3 s.
-8. **Direction.** Record each thruster's flow direction with a short, gentle stick push (the T200 doc suggests 1550 µs, `Docs/Motors/bluerobotics_t200_thruster.md:227`).
-9. **One channel at a time.** Repeat steps 1 to 8 for each of the other seven channels.
-10. **All eight together.** Raise the current limit in steps toward the firmware's 20 A (ASSUMED supply capability).
+1. **Bench copy.** Make the bench copy of `new_ctl.ino` on the control Pi. It is Pair M's sketch (D1 option c) with `power_thrusters()` on and the trigger constants set to the bench controller's 0 to 1023 (P2). The third and fourth `sed` lines are only for a bench with no Bar02 and no BNO085 (D2). Every line below was verified on 2026-10-21.
+
+```bash
+# [control Pi] bench copy of new_ctl.ino; ~/rov-26 stays unmodified (verified 2026-10-21)
+mkdir -p ~/bench_fw/new_ctl && cp ~/rov-26/mcu/modes/new_ctl/new_ctl.ino ~/bench_fw/new_ctl/
+cd ~/bench_fw/new_ctl
+sed -i 's|^  //power_thrusters();|  power_thrusters();|' new_ctl.ino
+sed -i 's|^#define TRIGER_MAGNITUDE (255)|#define TRIGER_MAGNITUDE (1023)|; s|^#define TRIGGER_DEADZONE_CONST 10|#define TRIGGER_DEADZONE_CONST 40|' new_ctl.ino
+sed -i -E 's#^(  )(bar02_setup|BNO08x_setup|read_imu|read_bar02)\(\);#\1// BENCH: \2();#' new_ctl.ino
+sed -i 's|^  // BENCH: read_imu();|  delay(5); // BENCH: stands in for read_imu(), which waits about 5 ms for IMU reports|' new_ctl.ino
+grep -n "BENCH\|^  power_thrusters();\|TRIGER_MAGNITUDE (\|TRIGGER_DEADZONE_CONST " new_ctl.ino
+# expect: line 28 (1023), line 30 (40), lines 265 and 266 BENCH, line 635 delay(5), line 636 BENCH, line 640 power_thrusters();
+```
+
+   **Why the `delay(5)` is required.** `PIDFS::compute` divides by `passed_time` in whole milliseconds (`new_ctl.ino:104-122`). With the sensor reads removed, `loop()` takes microseconds, so `passed_time` is 0 on most passes and (0 - 0) / 0 is NaN. Kd = 0 does not help, because 0 times NaN is NaN. The NaN reaches `thruster_power` and converts to 0, so the thrusters ignore the sticks. In the real firmware, `read_imu()` paces the loop at about 5 ms (both reports enabled at 5000 µs, `new_ctl.ino:247-256`). With `delay(5)`, `$TNCTL` arrives about 4 times a second (bench, 2026-10-21).
+
+2. **One thruster.** Connect one ESC signal lead to HFL, pin 9, and its signal ground to a Teensy GND (`Docs/Motors/bluerobotics_basic_esc.md:44`). LY drives this channel directly.
+3. **Supply.** Set the supply to 12 V, output off. The 2026-10-21 bench used a 12 V 1.5 A supply, then a 12 V 5 A supply. Main info lists what each allows. On a 1.5 A supply, use slow mode (LB) and no triggers.
+4. **Thruster.** Put the thruster in water, propeller clear, hands clear.
+5. **Flash.** Quit miniterm (Ctrl+]) and stop the Pi script, then flash the bench copy:
+
+```bash
+# [control Pi] port from "arduino-cli board list" (usb1/1-1 on the bench, 2026-10-21)
+cd ~/bench_fw/new_ctl && arduino-cli compile -u -b teensy:avr:teensy41 -p usb1/1-1 .
+```
+
+6. **Arm.** Turn the supply output on. Listen for three rising tones, then one tone, then one more. Three tones followed by silence means no signal reaches the ESC.
+7. **Drive.** Start the laptop script first; it prints "socket created", "socket bound", "listening for connection". Then, with miniterm closed, start the Pi script. One input at a time (Main info, "Bench rule"). Push LY slowly: the thruster turns, and value 5 (`hfl_pwr`) follows. Release it and the thruster stops.
+
+```bash
+# [laptop] system Python (P2); verified 2026-10-21
+cd ~/rov-26 && python3 topside/modes/main.py
+```
+
+```bash
+# [control Pi] after quitting miniterm; verified 2026-10-21
+cd ~/rov-26 && python3 rpi/modes/main.py
+```
+
+8. **Link-loss check.** Hold LY at about 30%, then stop the laptop script with Ctrl+C. Expected: the thruster **keeps turning** (finding 5). Stop it with the supply switch. Record this. Then repeat, and unplug the Teensy's USB instead: the ESC should stop within about 0.3 s. On 2026-10-21 the ESC replayed its three startup tones when the USB cable was unplugged (Main info).
+9. **Pin check, all eight pins.** Flash `esc_all.ino` (below) and move the one ESC's signal lead from pin to pin. It sends 1500 µs on pins 2 to 9. Typing a digit from 2 to 9 in miniterm spins that pin at 1600 µs for 3 s. On 2026-10-21 this verified all eight pins with one ESC and one T200.
+
+```bash
+# [control Pi] write the 18 lines below in short pastes, then check the length before compiling
+mkdir -p ~/bench_fw/esc_all && cd ~/bench_fw/esc_all
+wc -l esc_all.ino                                               # expect 18
+arduino-cli compile -u -b teensy:avr:teensy41 -p usb1/1-1 .     # port from arduino-cli board list
+python3 -m serial.tools.miniterm /dev/ttyACM0 115200            # type 2 to 9; Ctrl+] quits
+```
+
+   `~/bench_fw/esc_all/esc_all.ino`, 18 lines, verified on the bench 2026-10-21:
+
+```cpp
+// Bench test, not part of rov-26. Stop pulse on pins 2-9; press 2-9 to spin that pin forward for 3 s.
+#include <Servo.h>
+Servo esc[10];
+void setup() {
+  for (int p = 2; p <= 9; p++) { esc[p].attach(p); esc[p].writeMicroseconds(1500); }
+  Serial.begin(115200);
+}
+void loop() {
+  int c = Serial.read();
+  if (c < '2' || c > '9') return;
+  int p = c - '0';
+  Serial.printf("pin %d forward\n", p);
+  esc[p].writeMicroseconds(1600);
+  delay(3000);
+  esc[p].writeMicroseconds(1500);
+  Serial.println("stop");
+  while (Serial.available()) Serial.read();
+}
+```
+
+10. **Direction.** Record each thruster's flow direction with a short, gentle stick push (the T200 doc suggests 1550 µs, `Docs/Motors/bluerobotics_t200_thruster.md:227`). Still open after 2026-10-21 (P7).
+11. **All eight together.** Raise the current limit in steps toward the firmware's 20 A (ASSUMED supply capability), still one input at a time below 17 A. Not run on 2026-10-21: the bench had one ESC and one T200.
 
 **Done when.**
-- Every ESC arms with the two-tone sequence.
+- Every ESC arms: three rising tones, then one tone, then one more. Passed on 2026-10-21 with one ESC.
+- `esc_all.ino` spins the thruster from each of pins 2 to 9. Passed on 2026-10-21.
 - Every thruster follows its stick and stops when the stick is centered.
 - The link-loss result is recorded, and the supply switch is confirmed as the stop.
 
 **Gotchas.**
 - **Ctrl+C does not stop a thruster. The supply switch does.** So does unplugging the Teensy.
 - Regenerative braking on direction changes can trip a bench supply's over-current protection (`Docs/Motors/bluerobotics_basic_esc.md:210-215`).
-- A signal line held high for more than 15 ms at ESC power-up puts the ESC in its bootloader (`Docs/Motors/bluerobotics_basic_esc.md:127-131`). Teensy pins are inputs until the sketch runs (`Docs/tbd/pjrc_teensy_4_1.md:138`), so power the Teensy first.
-- **The robot never moves on the bench, so any RY or trigger request saturates.**
-  - RY asks for a depth rate (`tuning.ino:443-455`), and the sensor never sees one. With `new_ctl.ino`'s fixed gains, full RY drives the vertical thrusters to the current cap.
-  - Triggers ask for a yaw rate the IMU never sees.
-  - Use gentle inputs.
+- A signal line held high for more than 15 ms at ESC power-up puts the ESC in its bootloader (`Docs/Motors/bluerobotics_basic_esc.md:127-131`). Teensy pins are inputs until the sketch runs (`Docs/tbd/pjrc_teensy_4_1.md:138`), so power the Teensy first. On 2026-10-21 this case never occurred: the ESC played its normal startup tones at supply power-up whether or not the Teensy was plugged in.
+- **The robot never moves on the bench, so RY and trigger requests saturate.**
+  - RY asks for a depth rate (`tuning.ino:443-455`), and the sensor never sees one. With `new_ctl.ino`'s fixed gains, RY drives the vertical thrusters into the current cap. Because of how the cap scales, RY alone peaks at about 1730 µs near 60 percent and falls to about 1618 µs at full (COMPUTED, Main info; V11).
+  - Triggers ask for a yaw rate the IMU never sees. One trigger alone peaks near 1284 µs at a 60 to 70 percent pull (COMPUTED).
+  - Use one input at a time, gently.
+- **Combining inputs can reach about 17 A on one thruster** (COMPUTED, Main info). Slow mode does not prevent it. Stay below a supply's limit with one input at a time.
 - **The holds act with the sticks centered.**
   - The depth hold differentiates pressure over one loop (`tuning.ino:419-426`), so sensor noise or lifting the sensor moves the vertical thrusters.
   - The heading hold reacts to turning the IMU. Its error sign looks inverted, and yaw rate is read from gyro x (`tuning.ino:404, 505-508`; README Section 8, note 3).
   - Keep the sensor board still and taped down.
+  - In the sensor-skip bench copy, every sensor value stays 0, so neither hold has an error to act on (from the code: `new_ctl.ino:429-435, 484-491`).
 - If `read_imu()` stops getting reports, `loop()` waits forever (`tuning.ino:398-413`), while the last pulses keep going out.
+- **Without the `delay(5)`, the sticks do nothing** in the sensor-skip copy: the PID divides by zero milliseconds and the NaN becomes 0 (Do, step 1).
+- **A single-pin test sketch drives only the pin in its `attach()` call.** Moving the wire to another pin without re-uploading looks like a dead pin. That happened on 2026-10-21. Use `esc_all.ino`, which drives pins 2 to 9.
+- **Long pastes get cut off.** Long heredocs pasted into the Pi's terminal were truncated twice on 2026-10-21. Keep pasted blocks short and check the result with `wc -l` (`esc_all.ino` is 18 lines).
 - The ESC is not waterproof, and its heat spreader must be in air (`Docs/Motors/bluerobotics_basic_esc.md:48-54`). Only the thrusters go in the water.
 
 ### P7. Acceptance: The Bench Behaves Like the Team's ROV
@@ -560,29 +698,45 @@ python3 -m serial.tools.miniterm /dev/ttyACM0 115200     # ASSUMED tool; expect 
 - The rows below are read from `tuning.ino`. `new_ctl.ino` has the same mixing at the lines given in brackets.
 - With `tuning.ino`, the depth and yaw response also depends on the gains in each frame (`tuning.ino:658-682`). `topside/modes/tuning.py:28-47` holds the team's last values, but they never reach the Teensy in the repo version (finding 1).
 - "pwr" is µs away from 1500.
+- On the 2026-10-21 bench the trio was Pair M with the P6 bench copy of `new_ctl.ino`: triggers 0 to 1023 with a dead zone of 40, and no sensors, so the two hold rows cannot be tested.
+- **`$TNCTL` order.** The first eight values are offsets from 1500 µs for VFL, VFR, VBL, VBR, HFL, HFR, HBL, HBR, which are pins 8, 4, 7, 3, 9, 5, 6, 2 (`new_ctl.ino:50-57, 584-601`).
 
 | Input | Expected | Source |
 |---|---|---|
 | LY push | All four horizontal outputs move together, up to 200 | `tuning.ino:482-487` (`new_ctl.ino:465-470`) |
 | LX push | HFL and HBR move one way, HFR and HBL the other, up to 160 | `tuning.ino:489-494` (`new_ctl.ino:472-477`) |
 | LB press | LY and LX outputs halve; press again to restore | `tuning.ino:381-396` (`new_ctl.ino:364-379`) |
-| LT alone | Yaw rate request (LT - RT) / 1023 x 180 deg/s (255 in `new_ctl.ino`); HFL and HBL one way, HFR and HBR the other | `tuning.ino:28, 498-499, 510-515` (`new_ctl.ino:28, 481-482, 493-498`) |
+| LT alone | Yaw rate request (LT - RT) / 1023 x 180 deg/s (255 in `new_ctl.ino`, 1023 in the bench copy); HFL and HBL one way, HFR and HBR the other | `tuning.ino:28, 498-499, 510-515` (`new_ctl.ino:28, 481-482, 493-498`) |
 | RT alone | The opposite of LT | same |
-| Triggers released, IMU turned by hand | Heading hold drives the horizontal pairs. If the sign is wrong, it pushes further away | `tuning.ino:501-508` (`new_ctl.ino:484-491`) |
+| Triggers released, IMU turned by hand | Heading hold drives the horizontal pairs. If the sign is wrong, it pushes further away. Needs the IMU | `tuning.ino:501-508` (`new_ctl.ino:484-491`) |
 | RY push | All four vertical outputs move together | `tuning.ino:443-445, 454-460` (`new_ctl.ino:426-428, 437-443`) |
-| RY released, sensor raised or lowered | Depth hold drives the vertical outputs | `tuning.ino:446-452` (`new_ctl.ino:429-435`) |
-| Sticks inside ±3000; triggers under 40 (10 in `new_ctl.ino`) | No response | `tuning.ino:29-30, 580-599` (`new_ctl.ino:29-30, 563-582`) |
+| RY released, sensor raised or lowered | Depth hold drives the vertical outputs. Needs the Bar02 | `tuning.ino:446-452` (`new_ctl.ino:429-435`) |
+| Sticks inside ±3000; triggers under 40 (10 in `new_ctl.ino`, 40 in the bench copy) | No response | `tuning.ino:29-30, 580-599` (`new_ctl.ino:29-30, 563-582`) |
 | RX, A, B, X, Y, RB, D-pad, Start, Back, stick clicks | No thruster response | `rpi/modes/main.py:39-58`; no sketch reads them |
-| Several axes at full | Outputs scale down to the 20 A estimate | `tuning.ino:538-567` (`new_ctl.ino:521-550`) |
+| Several axes at full | Outputs scale down to the 20 A estimate. Not monotonic: past about 60 percent, RY or a trigger gives less thrust (V11) | `tuning.ino:538-567` (`new_ctl.ino:521-550`) |
 | Thruster lines on the laptop | The laptop prints `$RPCTL,<Teensy line>,*FF` (topside/main.py only) | `rpi/modes/main.py:75-82`, `topside/modes/main.py:24-34` |
 
-**Do.** Go down the table one row at a time, with gentle inputs. Write down which physical direction "LY up", "LX right", "LT" and "RY up" produce. Those signs are NOT IN CODE and P9 needs them.
+**Do.** Run the trio as in P6, step 7: the laptop script first, then the Pi script with miniterm closed. Go down the table one row at a time, with gentle inputs, one input at a time (P6 "Bench rule"). Write down which physical direction "LY up", "LX right", "LT" and "RY up" produce. Those signs are NOT IN CODE and P9 needs them.
 
-**Done when.** Every row behaves as listed, the four signs are recorded, and the heading-hold direction is recorded as "corrects" or "runs away".
+**Shutdown order.** Supply off first, then the Pi script, then the laptop script. Ctrl+C leaves the Teensy on its last command (bench, 2026-10-21; finding 5).
+
+**Bench result, 2026-10-21.** Verified end to end: the controller, the laptop script, the Pi script, the Teensy running the P6 bench copy, one ESC and one T200.
+- On pin 3 (VBR), the right stick moves the thruster. On pin 9 (HFL), LY, LX and the triggers move it.
+- In slow mode, full LY gave 100 on values 5 to 8, and a slightly sideways stick gave 90,109,109,90.
+- A real line from the bench:
+
+```
+$TNCTL,0,0,0,0,100,100,100,100,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,*FF
+```
+
+- Still open: the physical push direction for LY up, LX right, LT and RY up. The heading-hold sign cannot be tested without the IMU.
+
+**Done when.** Every row behaves as listed, the four signs are recorded, and the heading-hold direction is recorded as "corrects" or "runs away". On 2026-10-21 the LY, LX, LB, trigger and RY rows were seen working (bench result above); the four signs, the two hold rows and the heading-hold direction are still open.
 
 **Gotchas.**
 - On the bench, rate requests saturate (see P6).
 - If the heading hold runs away, release the IMU and stop with the supply switch. Report it to Victoria (V8). Their deployed sketch may already be fixed.
+- Ctrl+C on either script does not stop a spinning thruster. Turn the supply off before stopping the scripts.
 
 ### P8. NEPI Joins and Watches
 
@@ -678,15 +832,18 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
    - (b) The repo's `tuning.ino` with `power_thrusters()` uncommented. Reject: no repo Pi script sends its frame, and misaligned bytes reach the gains and outputs (finding 1).
    - (c) Fallback: Pair M with a local `new_ctl.ino` with `power_thrusters()` uncommented. It is self-consistent, but it is not the team's current firmware: triggers 0 to 255, fixed gains, slower telemetry.
    - **Recommendation:** (a) if it arrives by 2026-10-20, otherwise (c).
+   - **Resolved for the bench (2026-10-21): (c).** The P6 bench copy of `new_ctl.ino` with `power_thrusters()` on, and the trigger constants set to 1023 and 40 for the bench controller. V1 is still open for the robot itself.
 2. **D2. Sensors on the bench Teensy** (P5, P6).
    - Wire a Bar02 and a BNO085: the team's configuration, needed for P7.
    - Or a bench-only sketch that skips both sensors. That needs edits in `setup()`, `read_imu()` and `read_bar02()`.
    - **Recommendation:** wire the sensors.
+   - **Resolved for the bench (2026-10-21): the sensor skip**, because no sensors were on the bench. The skip is two `sed` lines in the P6 bench copy, plus a `delay(5)` in place of `read_imu()` so the PID timing does not divide by zero (P6, step 1). P7's two hold rows wait for the sensors.
 3. **D3. Stabilization toggle** (P9).
    - (a) RB on the controller, handled on the Pi. Small Pi change only, but tied to one controller and one free button.
    - (b) A keyboard hotkey in the team's topside script, sent as a new event code. This changes both team scripts: an unknown code crashes the unmodified Pi script at `rpi/modes/main.py:72`. It needs keyboard focus, and generalizes only to this topside script.
    - (c) A toggle in NEPI that the Pi accepts, with RB as the pilot's off-latch. No topside change, the same control for every vehicle NEPI connects to, and per-axis pilot override at all times.
    - **Recommendation:** (c).
+   - **Being built as (c)** for the bench (P9). Victoria has not confirmed it yet (V10).
 4. **D4. Stabilization camera** (P8, P9).
    - Idea 1: the hull-fixed down camera (V3), with the claw masked out of the image.
    - Idea 2: the NEPI Pi's own bottom camera.
@@ -696,7 +853,7 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
    - (a) Teensy leveling for pitch and roll, switched on with stabilization.
    - (b) NEPI pitch and roll targets through an agreed spare input.
    - Both are team firmware changes. **Recommendation:** (a) first, with (b) once (a) works.
-7. **D7. Where to flash the Teensy** (P5). From the control Pi, as `upload.sh` implies, or from the laptop. **Recommendation:** the control Pi, which matches the sealed robot.
+7. **D7. Where to flash the Teensy** (P5). From the control Pi, as `upload.sh` implies, or from the laptop. **Recommendation:** the control Pi, which matches the sealed robot. **Resolved for the bench (2026-10-21): the control Pi**, with the port taken from `arduino-cli board list` rather than `upload.sh`'s `/dev/ttyACM0` (P5).
 
 ## QUESTIONS FOR VICTORIA
 
@@ -704,12 +861,15 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
 2. **V2.** What is the tether's link type and speed? We have your 60 ms latency, but not the bandwidth. Blocks P8 (send rounds, Idea 1) and P9.
 3. **V3.** Which down camera is fixed to the hull: the one on the claw, or the one facing the back claw? Does the back claw move through its view? Blocks P8 and P9.
 4. **V4.** Which OS and Python version does the topside computer run? Which controller model? Do its triggers report 0 to 255 or 0 to 1023? Blocks P2.
+   - Our bench note, not an answer from the team: the bench controller's triggers report 0 to 1023 (P2, 2026-10-21). Your controller may differ.
 5. **V5.** Which `/dev/videoN` and which UDP port is each of the four cameras, and how do you start the four streams? Blocks P3.
 6. **V6.** How do you flash the Teensy: from the Pi with `upload.sh`? How did you install the MS5837 library? Blocks P5.
+   - Added after the bench (2026-10-21): the repo's `MS5837/` folder does not compile, because its `MS5837.h` is the newer Blue Robotics version and its `MS5837.cpp` the older one (P5). Do you build against the library-manager "BlueRobotics MS5837 Library" instead? Also, `upload.sh`'s `-p /dev/ttyACM0` fails on a fresh Teensy; do you flash with the port from `arduino-cli board list`?
 7. **V7.** What supply voltage and fuse do the thrusters run on? Blocks P6.
 8. **V8.** Does your deployed sketch have an arming hold, or a timeout that stops the thrusters when frames stop? Is the heading-hold sign correct in the water? Blocks P6 and P7.
 9. **V9.** Will you add pitch and roll leveling on the Teensy, and an input for pitch and roll targets? Blocks P9.
 10. **V10.** For testing, is a "Stabilize" control on NEPI's page on the topside computer, with RB as the pilot's off switch, what you meant by a hotkey on the computer? Blocks P9.
+11. **V11.** Is the current limiter meant to reduce thrust as a stick goes further? `limit_current()` (`new_ctl.ino:521-550`) scales pulse width linearly against a summed-amps estimate for all four thrusters in a group. So thrust is not monotonic in stick travel. COMPUTED: RY past about 60 percent gives less vertical thrust than 60 percent does, and the triggers behave the same way. The limiter also models all eight thrusters on the bench, where only one is connected. Seen on 2026-10-21: holding LY full and pushing RY past about 50 percent cut HFL from 1700 to 1651 µs, a slight slowdown. Does your deployed sketch do the same? Affects P6, P7 and P9.
 
 ## Doc Changes Pending
 
