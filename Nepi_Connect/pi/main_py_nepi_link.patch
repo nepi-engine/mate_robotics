@@ -1,0 +1,36 @@
+--- a/main.py
++++ b/main.py
+@@ -6,6 +6,7 @@
+ import time
+ import serial.tools.list_ports
+ import socket
++import nepi_link
+ 
+ HOST = '192.168.68.12'
+ PORT = 10110 # standard NMEA port
+@@ -75,7 +76,7 @@
+ def transmit_topside_socket():
+     time.sleep(1)
+     while(True):
+-        nmea: str = "$RPCTL," + str(onboard_data) + ",*FF" # dummy checksum
++        nmea: str = "$RPCTL," + str(onboard_data) + nepi_link.topside_tag() + ",*FF" # dummy checksum
+         len_str: str = str(len(nmea)).zfill(4)
+         transmission = (len_str + nmea).encode('ASCII')
+         s.send(transmission)
+@@ -96,13 +97,15 @@
+     topside_thread = threading.Thread(target=transmit_topside_socket)
+     topside_thread.daemon = True
+     topside_thread.start()
++    nepi_link.start()
+     while True:
+         monitor_socket_input()
+-        gamepad_input_tuple = tuple(gamepad_inputs)
++        gamepad_input_tuple = nepi_link.merge_inputs(gamepad_inputs)
+         nmea_bytes = nmea_encode.nmea_encode(gamepad_input_tuple)
+         if(ser.in_waiting > 0):
+             try:
+                 onboard_data = ser.readline().decode('ASCII').rstrip()
++                nepi_link.on_teensy_line(onboard_data)
+                 print(onboard_data)
+             except UnicodeDecodeError:
+                 onboard_data = "unicode error"

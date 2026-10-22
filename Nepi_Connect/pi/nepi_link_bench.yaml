@@ -1,0 +1,16 @@
+# nepi_link settings for the bench (BENCH_SETUP_PLAN.md P9). On the control Pi
+# this file is renamed nepi_link.yaml and sits beside nepi_link.py and main.py.
+# Keys and defaults: LINK_PROTOCOL.md "Pi Configuration". An empty NEPI_LAN_IP
+# turns the link off.
+NEPI_LAN_IP: 192.168.68.23    # the NEPI Pi (A3); a fake NEPI run from the laptop needs 192.168.68.12 instead
+NEPI_STATUS_UDP_PORT: 5700
+NEPI_DEMAND_UDP_PORT: 5701
+NEPI_ASSIST_BUTTON: BTN_TR    # RB, the pilot's off-latch (D3 option c, pending V10)
+NEPI_MAX_SURGE: 0.2           # Pi-side cap on each demand, 0 to 1
+NEPI_MAX_SWAY: 0.2
+NEPI_MAX_YAW: 0.1
+NEPI_SURGE_SIGN: 1            # +1 or -1, still to be measured on the bench (P7)
+NEPI_SWAY_SIGN: 1
+NEPI_YAW_SIGN: 1
+NEPI_TRIGGER_DEADZONE: 40     # TRIGGER_DEADZONE_CONST in the P6 bench copy of new_ctl.ino
+NEPI_TRIGGER_MAX: 1023        # TRIGER_MAGNITUDE in the P6 bench copy of new_ctl.ino

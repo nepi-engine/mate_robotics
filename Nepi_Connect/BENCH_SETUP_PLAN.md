@@ -447,7 +447,7 @@ The decoder must:
 - Start socat before the Pi script, which exits if `/dev/ttyACM0` is missing.
 - Stop socat before plugging in the real Teensy, so the link name is free.
 - This fake decodes the 154-byte frame of the repo's Pi scripts. If Victoria's real Pi script sends gains too (V1), the decoder needs the 313-byte layout in `tuning.ino:127-166`.
-- The fake becomes the test harness for `nepi_link.py` in P9.
+- P9 does not need this fake. `nepi_link.py` is tested on the real Teensy running the P6 bench copy, with the ESC supply switched off.
 
 ### P5. Teensy Bring-Up, No ESCs Attached
 
@@ -789,18 +789,20 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
 **When.** Later, after P8.
 
 **Needs.**
-- P7 passed, and the trio Victoria confirms (V1).
+- P7 passed, and the trio Victoria confirms (V1). On the bench: Pair M with the P6 bench copy of `new_ctl.ino`, so the trigger constants are 40 and 1023.
 - The team's agreement to the Pi change (README Section 9, Q7) and to a firmware change for pitch and roll (D6).
-- The fake Teensy from P4.
+- For the `nepi_link` tests: the real Teensy running the P6 bench copy of `new_ctl.ino`, with the ESC supply switched off so no thruster can move.
 
-**Main info.** The wire contract is LINK_PROTOCOL; this step does not repeat it. In outline:
-- **On the control Pi: `nepi_link.py`.**
-  - It is imported by the Pi script that writes the Teensy. That is `rpi/modes/main.py` in Pair M, or the team's deployed script (V1). There are about four hook lines: import, `start()`, the merge just before `nmea_encode`, and the Teensy line (README Section 3).
-  - It merges NEPI's demand into a *copy* of the pilot's inputs. It applies the 250 ms timeout, the caps, the per-axis pilot override and the dead-zone mapping. It sends status to 192.168.68.23:5700 at 10 Hz, and accepts demands on port 5701 only from 192.168.68.23.
-  - The trigger constants must match the deployed sketch: 40 and 1023 for `tuning.ino` (`tuning.ino:28, 30`). The smallest yaw step is then 40 / 1023 x 180, about 7.0 deg/s.
-- **The toggle** (D3; recommended option).
+**Main info.** The wire contract is LINK_PROTOCOL; this step does not repeat it. Where `nepi_link.py` differs from it, see "Doc Changes Pending". In outline:
+- **On the control Pi: `nepi_link.py`** (`Nepi_Connect/pi/`, written 2026-10-21, standard library only, Python 3.8 or newer).
+  - It is imported by the Pi script that writes the Teensy. That is `rpi/modes/main.py` in Pair M, or the team's deployed script (V1). There are five hook lines: the import, `start()`, the merge just before `nmea_encode`, the Teensy line, and the topside tag (README Section 3). `Nepi_Connect/pi/main_py_nepi_link.patch` adds them to `rpi/modes/main.py` at `1af4984`.
+  - It merges NEPI's demand into a *copy* of the pilot's inputs. It applies the 250 ms timeout, the caps, the per-axis pilot override and the dead-zone mapping. It sends status to NEPI_LAN_IP:5700 every 100 ms, and accepts demands on port 5701 only from NEPI_LAN_IP (192.168.68.23).
+  - The trigger constants must match the deployed sketch: 40 and 1023 for `tuning.ino` (`tuning.ino:28, 30`) and for the P6 bench copy. The smallest yaw step is then 40 / 1023 x 180, about 7.0 deg/s.
+  - Config: the first file found of `$NEPI_LINK_CONFIG`, `nepi_link.yaml` beside `nepi_link.py`, and `../../config.yaml`. `Nepi_Connect/pi/nepi_link_bench.yaml` is the bench file. With no file or an empty `NEPI_LAN_IP`, the link is off and the script behaves as before.
+  - Tests: `Nepi_Connect/pi/test_nepi_link.py`, run with `python3 -B -m unittest -v test_nepi_link` from that folder. `Nepi_Connect/tools/fake_nepi.py` stands in for NEPI.
+- **The toggle** (D3 option c, built in `nepi_link.py`; Victoria has not confirmed it yet, V10).
   - It is a "Stabilize" control on NEPI's hold process, used from the topside computer's browser. That gives Victoria's "hotkey on the computer itself" for every vehicle NEPI connects to, with no change to the team's topside script.
-  - NEPI's request arrives as a rising edge of the demand's `active` flag. The Pi engages only while the link is up.
+  - NEPI's request arrives as a rising edge of the demand's `active` flag: an accepted demand with `active` true whose previous accepted demand had `active` false. A first demand with `active` true does nothing, so NEPI sends `active` false at 10 Hz while its hold is off, and a restarted Pi script never resumes a hold by itself. The Pi engages only while the link is up.
   - **Pilot takeback.** Any stick or trigger outside its dead zone wins its axis on the next frame (0.1 s). RB (`BTN_TR`, slot 13, unused by both sketches, `rpi/modes/main.py:53`) is the pilot's off-latch: it drops every axis to the pilot and stays off until NEPI sends a fresh request. Assist also turns off after 2 s without a fresh demand (LINK_PROTOCOL "Pi Rules").
 - **On NEPI: `rbx_rov_link`.** An RBX driver. Discovery listens on UDP 5700. It builds a navpose from telemetry depth, heading, pitch and roll, and turns teleop velocity into demands (README Section 4, item 3).
 - **On NEPI: the hold process**, a ProcessIF process (README Section 4, item 5). On engage it takes a reference image. It estimates shift and rotation in each frame and sends surge, sway and yaw demands at up to 10 Hz.
@@ -811,9 +813,61 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
 
 **Do (build order).**
 1. Finish, commit and test `idx_net_stream`'s fastmjpg mode on the NEPI Pi with the P8 video.
-2. Write `nepi_link.py`. Test it against the fake Teensy (P4) with no thrust: toggle, timeout, override and mapping, per README Phase 3.
+2. `nepi_link.py`, its tests and `fake_nepi.py`: written 2026-10-21. Install it on the bench Pi and run "First test, supply off" below: toggle, timeout, override and mapping, per README Phase 3, with no thrust.
 3. Write `rbx_rov_link`. Check read-only telemetry (README Phase 2).
 4. Write the hold process. Test signs, timeout and override with propellers out of the water (README Phase 3), then in water with low caps (README Phase 4).
+
+**Bench install.** The bench runs a patched copy of the Pi script in `~/bench_fw/rpi`. The team's `~/rov-26` checkout stays unmodified.
+
+```bash
+# [control Pi] copy the Pi script folder; this brings the nmea_encode extension already rebuilt for Python 3.13 (P1)
+mkdir -p ~/bench_fw/rpi && cp -r ~/rov-26/rpi/modes/. ~/bench_fw/rpi/
+```
+
+```bash
+# [laptop] from its mate_robotics checkout
+scp Nepi_Connect/pi/nepi_link.py Nepi_Connect/pi/nepi_link_bench.yaml Nepi_Connect/pi/main_py_nepi_link.patch PIUSER@192.168.68.22:bench_fw/rpi/
+```
+
+Replace PIUSER with the Pi's login name, the part before the @ in the Pi's shell prompt.
+
+```bash
+# [control Pi] add the five hook lines, and make the bench config the active one
+cd ~/bench_fw/rpi && patch main.py < main_py_nepi_link.patch && mv nepi_link_bench.yaml nepi_link.yaml
+# for the fake-NEPI test, NEPI is the laptop: the Pi accepts demands only from NEPI_LAN_IP
+sed -i 's|^NEPI_LAN_IP: .*|NEPI_LAN_IP: 192.168.68.12    # fake NEPI on the laptop (P9 first test); the NEPI Pi is 192.168.68.23|' nepi_link.yaml
+grep -n "^NEPI_LAN_IP\|^NEPI_TRIGGER" nepi_link.yaml     # expect 192.168.68.12, 40 and 1023
+```
+
+**First test, supply off.** The Teensy runs the P6 bench copy, and the ESC supply is off, so no thruster can move. Judge everything by the `$TNCTL` values and the status lines. Quit miniterm first (P5).
+
+1. Start the laptop script (P2): `cd ~/rov-26 && python3 topside/modes/main.py`.
+2. On the Pi, start the patched copy. It prints `nepi_link: On: NEPI 192.168.68.12, status to UDP 5700, demands on UDP 5701, triggers 40 to 1023 (.../nepi_link.yaml)` before its main loop.
+
+```bash
+# [control Pi]
+cd ~/bench_fw/rpi && python3 main.py
+```
+
+3. On the laptop, in a second terminal, hold a small surge. `fake_nepi.py` sends `active` false for 0.5 s, then `active` true at 10 Hz, and prints one line per status.
+
+```bash
+# [laptop] second terminal, from the mate_robotics checkout
+python3 Nepi_Connect/tools/fake_nepi.py --pi 192.168.68.22 hold --surge 0.1 --seconds 120
+```
+
+4. Expected (COMPUTED, not yet seen on the bench): the status lines read `assist ON  nepi_on` with `out_ly 5706`, the laptop's `$RPCTL` line ends in `,NEPI:ON,*FF`, and `$TNCTL` values 5 to 8 read 34 in normal mode and 17 in slow mode. Values 1 to 4 stay 0. The arithmetic:
+   - **Pi** (LINK_PROTOCOL "Dead-zone mapping", `nepi_link.stick_value`): 0.1 is under the 0.2 cap, so LY = int(3000 + (0.1 - 0.01) / 0.99 x (32767 - 3000) + 0.5) = int(3000 + 2706.09 + 0.5) = 5706.
+   - **Teensy, normal mode** (`new_ctl.ino:465-470`): each horizontal power = 5706 / 32767 x 0.5 (`FOR_GAIN`) x 1 (direction) x 1.0 (`mult`) = 0.08707. LX and the triggers are 0, and with the sensors at 0 the heading hold adds 0 (`new_ctl.ino:479-498`). The largest is under 1, so nothing is normalized (`:500-506`), and the cast to `int32_t` truncates: 0.08707 x 400 = 34.83, so 34 (`:507-510`).
+   - **Teensy, slow mode** (LB, `mult` 0.5): 0.04354 x 400 = 17.41, so 17.
+   - `limit_current()` does not act: the team's table gives 0.00 A at 34 µs (`AMP_LIST`, `new_ctl.ino:21, 521-524`).
+5. Then, one at a time:
+   - **Pilot override.** Move LY past the dead zone. The pilot wins that axis: `out_ly` and values 5 to 8 follow the stick, and assist stays ON. Release it and NEPI's 34 returns.
+   - **Pilot off-latch.** Press RB. The status reads `assist off pilot_button`, the laptop line shows `NEPI:OFF`, and `fake_nepi.py` prints "Assist turned off on the Pi (pilot_button)" and switches to `active` false. Run the step 3 command again to re-engage: it starts with `active` false, which gives the fresh rising edge.
+   - **Timeout.** Stop `fake_nepi.py` with Ctrl+\ (it quits at once, with no `active` false tail; Ctrl+C would send `active` false and turn assist off as `nepi_off` instead). After 250 ms the laptop line shows `NEPI:WAIT` and values 5 to 8 return to the pilot's. After 2 s the reason is `timeout` and the line shows `NEPI:OFF`. Watch the reason with `python3 Nepi_Connect/tools/fake_nepi.py --pi 192.168.68.22 watch`.
+6. Only after every check above passes: a supply-on test with the caps in `nepi_link.yaml` unchanged, one input at a time (P6 "Bench rule"), thruster in water, supply switch in hand. Shutdown order as in P7: supply off first.
+
+To use the real NEPI Pi later, set `NEPI_LAN_IP` back to 192.168.68.23 in `~/bench_fw/rpi/nepi_link.yaml`.
 
 **Done when.**
 - The README Phase 3 checks pass on the bench.
@@ -824,6 +878,10 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
 - LINK_PROTOCOL parses only 20-value `$TNCTL` lines. `tuning.ino` sends 25 values, and `rpi/modes/tuning.py` strips the header (`rpi/modes/tuning.py:118-119`). Fix the parser before using `tuning.ino`.
 - Nothing downstream of the merge times out (finding 5). A Pi crash leaves the last merged frame on the Teensy.
 - Anything on the hub can pretend to be NEPI (README Section 5, rule 8). Keep the bench hub closed.
+- `fake_nepi.py` on the laptop must be named in `NEPI_LAN_IP` (192.168.68.12). Otherwise every demand is dropped, and the status lines show `demand_bad` rising.
+- If `patch` is missing on the Pi, install it with `sudo apt install -y patch` (ASSUMED package name).
+- If no status lines arrive on the laptop, check that no firewall drops UDP 5700 (ASSUMED: Ubuntu's ufw is inactive by default).
+- `nepi_link` copies slow mode from LB with the Teensy's rule, but the Teensy only sees the frame every 0.1 s, so a very short LB tap can leave the two copies different. The status `slow` field is a guide, not the Teensy's state (LINK_PROTOCOL "Status").
 
 ## DECISIONS NEEDED
 
@@ -875,8 +933,22 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
 
 **LINK_PROTOCOL.md**
 - `NEPI_LAN_IP: ''` becomes `192.168.68.23` (A3). The same goes for every `<NEPI_LAN_IP>` in "Video to NEPI".
-- The **Toggle** rule and `NEPI_ASSIST_BUTTON` follow D3. The recommendation is a NEPI request (rising edge of `active`) with RB as the pilot's off-latch.
-- `NEPI_TRIGGER_DEADZONE` and `NEPI_TRIGGER_MAX` must match the deployed sketch: 40 and 1023 for `tuning.ino`. Recompute the mapping table and the 7.1 deg/s figure from those values.
+- The **Toggle** rule and `NEPI_ASSIST_BUTTON` follow D3. The recommendation is a NEPI request (rising edge of `active`) with RB as the pilot's off-latch. It is now built that way in `nepi_link.py` (list below), pending V10.
+- `NEPI_TRIGGER_DEADZONE` and `NEPI_TRIGGER_MAX` must match the deployed sketch: 40 and 1023 for `tuning.ino`, and for the P6 bench copy of `new_ctl.ino` (`nepi_link_bench.yaml`). Recompute the mapping table and the 7.1 deg/s figure from those values.
+
+**LINK_PROTOCOL.md: where `nepi_link.py` (2026-10-21) differs from it.** Each line says what the code does, then what the protocol text still says.
+- **Toggle, D3 option (c), pending V10.** Assist turns on only at a rising edge of the demand's `active` flag, not by a press of `NEPI_ASSIST_BUTTON`. The button only turns assist off (reason `pilot_button`); a press while assist is off does nothing. "Toggle" in "Pi Rules" and "Assist" in "Terms" ("the pilot turns it on and off with one button") need rewriting.
+- **The rising edge needs a prior `active` false.** An edge is an accepted demand with `active` true whose previous accepted demand had `active` false. Before the first accepted demand there is no previous value, so a first `active` true does nothing, and a restarted Pi script never resumes a hold by itself. After `pilot_button` or `timeout`, only a fresh false-then-true turns assist back on.
+- **Assist turns off on `active` false.** An accepted demand with `active` false turns assist off at once (reason `nepi_off`). The protocol only says such a demand counts as 0 on every axis.
+- **NEPI sends demands at 10 Hz all the time,** with `active` false while its hold is off, so the Pi can see the edge. "Demand: NEPI to Pi" ("while the newest status says `assist: true`") and "NEPI Rules" ("sends demands only while the newest status has `assist: true`") must change.
+- **2 s auto-off** counts from the last accepted demand while assist is on, not "from the moment assist was turned on". The two agree at turn-on, because assist turns on only when a demand is accepted.
+- **Timeout pass-through.** While assist is on and the newest demand is older than 250 ms, the pilot's inputs pass through unchanged and the tag reads `NEPI:WAIT`. The protocol's "counts as 0 on every axis" would send LY = 0 instead of the pilot's in-dead-zone value. The Teensy acts the same on both, but `out_ly` differs, and README Phase 3 expects the pilot's value.
+- **New status field `assist_reason`**, a string: `start`, `nepi_on`, `nepi_off`, `pilot_button` or `timeout`. It is the reason for the most recent change of `assist`, and `start` until the first change. Add it to the "Status" table.
+- **Config lookup.** The first file that exists wins: `$NEPI_LINK_CONFIG`, then `nepi_link.yaml` beside `nepi_link.py`, then `../../config.yaml` relative to `nepi_link.py` (the team's repo root when it sits in `rpi/modes`). PyYAML is used if it imports; otherwise a built-in parser reads flat `KEY: value` lines. The protocol says only "the team's `config.yaml`".
+- **Invalid config turns the link off.** A value out of range or of the wrong type turns the link off with a printed reason, rather than falling back to a default. `NEPI_ASSIST_BUTTON` accepts only `BTN_TR`; `BTN_TL` is rejected because LB is slow mode.
+- **Telemetry parsing.** A `$TNCTL` line must end in a `*XX` field. A value of `nan`, `inf` or `ovf` (what Arduino prints for a double it cannot show) counts the line as `tn_bad`, because JSON has no NaN.
+- **Status ranges.** `out_lx`, `out_ly`, `out_lt` and `out_rt` are reported clamped to their stated ranges, so a controller or config mismatch cannot make the whole status invalid.
+- **Ages** (`demand_age_ms`, `tn_age_ms`) are rounded to the nearest millisecond.
 - The Teensy telemetry parser must accept `tuning.ino`'s 25-value lines, including `millis()`, and header-stripped lines from `rpi/modes/tuning.py`. Add a second field table.
 - Demand: "the Pi's 0.1 s serial write (`rpi/modes/main.py:84-88`)" becomes "the deployed Pi script's serial write", which is 0.1 s in both repo scripts.
 - Video: record the send-rounds result (F7) and the option of 2 rounds (D5).
@@ -886,6 +958,9 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
 - Section 1: the deployed firmware is `tuning.ino`, newer than the repo (A1). The repo's `tuning.ino` does not match either repo Pi script (finding 1).
 - Section 2: the diagram, the systemd excerpt and "Network" use 192.168.68.23. Add the Idea 1 and Idea 2 layouts.
 - Section 3: the hook goes into the deployed Pi script, not necessarily `rpi/modes/main.py`. "The assist button" follows D3. "Heading and the 7 deg/s step" uses the deployed sketch's trigger constants.
+- Section 3, after `nepi_link.py` (2026-10-21): the tested hook is `Nepi_Connect/pi/main_py_nepi_link.patch`, five lines, matching the illustrated diff. "`start()` reads `config.yaml`" becomes the config lookup above. "A press toggles assist" becomes: RB only turns assist off; NEPI's Stabilize control turns it on (D3 option c, V10).
+- Section 5, rule 5 ("only the pilot can turn it back on. NEPI never re-engages silently"): under D3 option (c), NEPI turns assist on with a rising edge, at the operator's Stabilize control, and never by itself after a restart or a timeout.
+- Section 6, Phase 3: "RB switches the topside display between `NEPI:ON` and `NEPI:OFF`" becomes "NEPI's Stabilize control shows `NEPI:ON`; RB shows `NEPI:OFF`".
 - Section 3 "Optional: pitch and roll leveling" and Section 6 Phase 5: pitch and roll are part of stabilization (F12), not optional.
 - Section 4, item 3: axis controls include pitch and roll.
 - Section 5, rule 5 and Section 6, Phase 3: update for the D3 toggle.
