@@ -118,7 +118,7 @@ The names copy the firmware's labels. Which physical direction each sign means i
 
 ## Demand: NEPI to Pi
 
-NEPI sends a demand every 100 ms while the newest status says `assist: true`. That matches the Pi's 0.1 s serial write (`rpi/modes/main.py:84-88`), so sending faster would change nothing.
+NEPI sends a demand every 100 ms while the link is up, with `active` false while its hold is off, so the Pi can see the rising edge of `active` that turns assist on. That matches the Pi's 0.1 s serial write (`rpi/modes/main.py:84-88`), so sending faster would change nothing.
 
 | Field | Type, range | Meaning |
 |---|---|---|
@@ -181,7 +181,8 @@ trigger(m) = 0                                                        if m < 0.0
 ## NEPI Rules
 
 - NEPI treats the link as down when no valid status has arrived for 500 ms. While it is down, NEPI reports the robot as not ready and sends no demands.
-- NEPI sends demands only while the newest status has `assist: true`.
+- While the link is up, NEPI sends a demand every 100 ms, always. It sends `active` true while it holds a command from its hold newer than 250 ms and is not latched. Otherwise it sends `active` false with every axis 0.
+- **Latch.** An engagement is an unbroken run of demands with `active` true. While NEPI sends `active` true, a newest status with `assist: false` latches NEPI to `active` false, if assist was on during this engagement (the pilot's button, or the bridge's 2 s timeout) or 0.5 s has passed since the engagement's first `active` true (a link outage, or a restarted bridge, which ignores a first `active` true). A stop command on NEPI also sets the latch. It clears only after NEPI's hold has sent no command for 1 s, so engaging again takes a fresh request. NEPI never turns assist back on by itself.
 - ROS, which NEPI is built on, counts sideways as positive to the left and turning as positive counter-clockwise. This protocol uses right and clockwise. The NEPI driver flips both signs, in one place.
 - NEPI never sends a nonzero `pitch` or `roll` in version 1.
 

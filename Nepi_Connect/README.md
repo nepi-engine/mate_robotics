@@ -231,15 +231,18 @@ Nothing here is built yet. Recommended build order:
    - The header's capture time gives the latency, provided both clocks are synchronized.
    - The accepted-forms comment in `idx_net_stream_params.yaml:18-29` gets the new form.
 2. **`nepi_link.py` and a fake Teensy for the bench** (Section 7). Both are Python and follow NEPI's naming rules.
-3. **An RBX driver, `rbx_rov_link`** (in `Drivers/rbx_drivers`), started from `rbx_template_*` with `setup_new_driver.sh` (`DRIVER_NAME="rov_link"`).
-   - Discovery listens on UDP 5700 for a valid status from the ROV's address, instead of probing serial ports (`rbx_template_discovery.py:106-121`). It stops listening before it launches the node.
-   - The node registers `RBXRobotIF` (`rbx_template_node.py:165-201`) with:
-     - empty state, mode and action lists, which the template allows (`:32-37`);
+3. **An RBX driver, `rbx_mate_rov_link`** (in `Drivers/rbx_drivers`), with the file names `setup_new_driver.sh` gives for `DRIVER_NAME="mate_rov_link"`. It follows `rbx_gazebo` in the nepi_drivers repo, which is newer than `rbx_template_*`. Written 2026-10-22; not yet run under ROS or on the robot.
+   - Discovery listens on UDP 5700 for up to 1.5 s for one valid status from the ROV's address, then closes the port and launches the node. It never listens while the node runs, because the node holds that port. Its options are `host` (192.168.68.22), `status_port` (5700) and `demand_port` (5701).
+   - **Two classes in the node file.** `MateRovLink` holds all the link logic: both sockets, status checking, link-up tracking, the newest teleop command, the on/off rule, the latch and `seq`. It follows `FastMJPGReceiver` and `NepiLink`, and never calls ROS, so `Nepi_Connect/tools/test_rbx_mate_rov_link.py` tests it against the real `nepi_link.py`. `MateRovLinkNode` follows `rbx_gazebo`: it starts the link, runs its send tick on a 10 Hz timer, and registers `RBXRobotIF`.
+   - The node registers `RBXRobotIF` with:
+     - empty state, mode and action lists;
      - axis controls for x, y and yaw only;
-     - a navpose built from telemetry depth, heading, pitch and roll;
-     - the teleop pair `teleopControlsReadyFunction` (true while the link is up and assist is on) and `setTeleopVelocityFunction`.
-   - The latter keeps the newest command with its time. A 10 Hz timer sends it as a demand: surge = linear.x, sway = -linear.y, yaw = -angular.z. linear.z is ignored. Any command older than 250 ms becomes zero.
-   - Assist and the per-axis pilot flags are published on one driver topic, `link_status`, until `RBXRobotIF` has fields for them.
+     - a navpose of depth, yaw, pitch and roll from the newest telemetry, skipped while `tn` is null or older than 500 ms;
+     - `goStopFunction`, and the teleop pair `teleopControlsReadyFunction` and `setTeleopVelocityFunction`. Every other callback is None.
+   - **Readiness.** `teleopControlsReadyFunction` is true while the link is up: a valid status from the ROV arrived within the last 500 ms. It does not wait for assist, because `RBXRobotIF` drops commands while the robot is not ready, and assist only comes on after NEPI sends `active` true.
+   - **On/off rule.** While the link is up, the driver sends a demand every 100 ms. It sends `active` true while it holds a teleop command newer than 250 ms and is not latched, with surge = linear.x, sway = -linear.y and yaw = -angular.z, each clamped to -1 to 1. linear.z is ignored. Otherwise it sends `active` false with every axis 0. While the link is down it sends nothing. The first `seq` comes from the wall clock, so a restarted node is always ahead of its previous run.
+   - **Latch.** While it sends `active` true, a newest status with assist false latches the driver to `active` false, if assist was on during this engagement (RB, or the Pi's 2 s timeout) or 0.5 s has passed since the engagement's first `active` true (a link outage, or a restarted Pi script, which ignores a first `active` true). The latch clears only after no teleop command has arrived for 1 s, so the hold process must stop and restart its commands to engage again. Stop clears the stored command and sets the latch. NEPI never turns assist back on by itself.
+   - **Link state for the hold process.** Every tick, the node publishes the link's state as JSON in a `std_msgs/String` on its own `link_status` topic: `link_up`, `latched`, `assist`, `assist_reason`, the four pilot flags, `slow`, `demand_age_ms` and `tn_age_ms`. `RBXRobotIF` has no fields for these.
 4. **Using `RBXRobotIF` as it is.** An earlier analysis expected a missing piece here: `goto_velocity` blocks, refuses new commands while one is active, and sleeps 0.5 s (nepi_engine repo, `nepi_api/src/nepi_api/device_if_rbx.py:1455, 1459, 1472`). But `RBXRobotIF` already has `set_teleop_velocity`. It is a stock `Twist` message with a queue of one, so the newest command wins, and it never blocks (`:644-657, 1278-1296`). So no interface change is needed, and the hold loop does not have to live inside the driver. Two small caveats:
    - The interface logs one info line per teleop message (`:1279`), which is noisy at 10 Hz. A throttled log would be a small engine change.
    - The interface has no teleop timeout. The driver owns the timeout, as `rbx_ardupilot` does with its own (nepi_drivers repo, `rbx_drivers/rbx_ardupilot_node.py:670`).

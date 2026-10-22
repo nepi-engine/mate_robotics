@@ -780,7 +780,7 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
 **Gotchas.**
 - Never aim the copy at an address outside 192.168.68.0/24 (F6).
 - Do not run `nepi_connect_setup.sh` on the control Pi (F8).
-- NEPI sends nothing in this step: no `rbx_rov_link` and no demands.
+- NEPI sends nothing in this step: no `rbx_mate_rov_link` and no demands.
 
 ### P9. Stabilization Toggle Through the Control Pi
 
@@ -804,7 +804,7 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
   - It is a "Stabilize" control on NEPI's hold process, used from the topside computer's browser. That gives Victoria's "hotkey on the computer itself" for every vehicle NEPI connects to, with no change to the team's topside script.
   - NEPI's request arrives as a rising edge of the demand's `active` flag: an accepted demand with `active` true whose previous accepted demand had `active` false. A first demand with `active` true does nothing, so NEPI sends `active` false at 10 Hz while its hold is off, and a restarted Pi script never resumes a hold by itself. The Pi engages only while the link is up.
   - **Pilot takeback.** Any stick or trigger outside its dead zone wins its axis on the next frame (0.1 s). RB (`BTN_TR`, slot 13, unused by both sketches, `rpi/modes/main.py:53`) is the pilot's off-latch: it drops every axis to the pilot and stays off until NEPI sends a fresh request. Assist also turns off after 2 s without a fresh demand (LINK_PROTOCOL "Pi Rules").
-- **On NEPI: `rbx_rov_link`.** An RBX driver. Discovery listens on UDP 5700. It builds a navpose from telemetry depth, heading, pitch and roll, and turns teleop velocity into demands (README Section 4, item 3).
+- **On NEPI: `rbx_mate_rov_link`.** An RBX driver. Discovery listens on UDP 5700. It builds a navpose from telemetry depth, heading, pitch and roll, and turns teleop velocity into demands (README Section 4, item 3).
 - **On NEPI: the hold process**, a ProcessIF process (README Section 4, item 5). On engage it takes a reference image. It estimates shift and rotation in each frame and sends surge, sway and yaw demands at up to 10 Hz.
 - **Pitch and roll** (F12; required, not optional).
   - No controller input reaches them today. The pitch and roll controllers are declared but unused (`tuning.ino:225-240`, `new_ctl.ino:208-223`).
@@ -814,7 +814,7 @@ Then add `fastmjpg://192.168.68.22:5600` to the `idx_net_stream` stream list in 
 **Do (build order).**
 1. Finish, commit and test `idx_net_stream`'s fastmjpg mode on the NEPI Pi with the P8 video.
 2. `nepi_link.py`, its tests and `fake_nepi.py`: written 2026-10-21. Install it on the bench Pi and run "First test, supply off" below: toggle, timeout, override and mapping, per README Phase 3, with no thrust.
-3. Write `rbx_rov_link`. Check read-only telemetry (README Phase 2).
+3. Write `rbx_mate_rov_link`. Check read-only telemetry (README Phase 2).
 4. Write the hold process. Test signs, timeout and override with propellers out of the water (README Phase 3), then in water with low caps (README Phase 4).
 
 **Bench install.** The bench runs a patched copy of the Pi script in `~/bench_fw/rpi`. The team's `~/rov-26` checkout stays unmodified.
@@ -940,7 +940,6 @@ To use the real NEPI Pi later, set `NEPI_LAN_IP` back to 192.168.68.23 in `~/ben
 - **Toggle, D3 option (c), pending V10.** Assist turns on only at a rising edge of the demand's `active` flag, not by a press of `NEPI_ASSIST_BUTTON`. The button only turns assist off (reason `pilot_button`); a press while assist is off does nothing. "Toggle" in "Pi Rules" and "Assist" in "Terms" ("the pilot turns it on and off with one button") need rewriting.
 - **The rising edge needs a prior `active` false.** An edge is an accepted demand with `active` true whose previous accepted demand had `active` false. Before the first accepted demand there is no previous value, so a first `active` true does nothing, and a restarted Pi script never resumes a hold by itself. After `pilot_button` or `timeout`, only a fresh false-then-true turns assist back on.
 - **Assist turns off on `active` false.** An accepted demand with `active` false turns assist off at once (reason `nepi_off`). The protocol only says such a demand counts as 0 on every axis.
-- **NEPI sends demands at 10 Hz all the time,** with `active` false while its hold is off, so the Pi can see the edge. "Demand: NEPI to Pi" ("while the newest status says `assist: true`") and "NEPI Rules" ("sends demands only while the newest status has `assist: true`") must change.
 - **2 s auto-off** counts from the last accepted demand while assist is on, not "from the moment assist was turned on". The two agree at turn-on, because assist turns on only when a demand is accepted.
 - **Timeout pass-through.** While assist is on and the newest demand is older than 250 ms, the pilot's inputs pass through unchanged and the tag reads `NEPI:WAIT`. The protocol's "counts as 0 on every axis" would send LY = 0 instead of the pilot's in-dead-zone value. The Teensy acts the same on both, but `out_ly` differs, and README Phase 3 expects the pilot's value.
 - **New status field `assist_reason`**, a string: `start`, `nepi_on`, `nepi_off`, `pilot_button` or `timeout`. It is the reason for the most recent change of `assist`, and `start` until the first change. Add it to the "Status" table.

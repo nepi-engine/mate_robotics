@@ -1,0 +1,55 @@
+# MATE ROV link RBX driver -- params / manifest.
+# See rbx_gazebo_params.yaml in nepi_drivers for the shipped reference of this
+# shape.
+
+driver:
+  pkg_name: RBX_MATE_ROV_LINK
+  display_name: MATE ROV Link
+  description: Driver package for the Coral Crusaders MATE ROV reached over the NEPI link protocol (UDP/JSON) to nepi_link.py on its control Pi
+  type: RBX
+  group_id: MATE
+
+  NODE_DICT:
+    file_name: rbx_mate_rov_link_node.py
+    class_name: MateRovLinkNode
+
+  # No separate driver file: the link to the ROV Pi lives in the node file's
+  # MateRovLink class, which the node holds, same as rbx_gazebo has no driver
+  # file of its own.
+  DRIVER_DICT:
+    file_name: None
+    class_name: None
+
+  DISCOVERY_DICT:
+    file_name: rbx_mate_rov_link_discovery.py
+    class_name: MateRovLinkDiscovery
+    process: CALL
+    OPTIONS:
+      # Address of the ROV's control Pi running nepi_link.py. Only status
+      # packets from this address count, both for discovery and for the
+      # launched node's link-up check, and demands are sent to it.
+      host:
+        type: String
+        options:
+          - ''
+        default: '192.168.68.22'
+        value: '192.168.68.22'
+      # Port on this device that the Pi sends its 10 Hz status to. Discovery
+      # listens here for one valid status before launching the node, which
+      # then holds this port itself -- so it is never probed while the node
+      # runs.
+      status_port:
+        type: Int
+        options:
+          - '1024'
+          - '65535'
+        default: '5700'
+        value: '5700'
+      # Port on the Pi that demands are sent to.
+      demand_port:
+        type: Int
+        options:
+          - '1024'
+          - '65535'
+        default: '5701'
+        value: '5701'
