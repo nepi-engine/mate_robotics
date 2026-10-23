@@ -8,7 +8,7 @@
 ## License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
 ##
 
-# The control Pi's side of the NEPI link: the stabilization toggle and the merge.
+# The control Pi's side of the NEPI link: the NEPI control toggle and the merge.
 #
 # The Coral Crusaders' Pi script (rov-26 rpi/modes/main.py) imports this file
 # and calls it at four places (Nepi_Connect/README.md Section 3):
@@ -19,20 +19,23 @@
 # stop() exists for tests. main_py_nepi_link.patch in this folder adds the hooks.
 #
 # The wire contract is Nepi_Connect/LINK_PROTOCOL.md. NEPI sends a demand
-# (surge, sway, yaw) to UDP 5701 at 10 Hz; this file merges it into a COPY of
-# the pilot's inputs just before nmea_encode, and sends NEPI a status to UDP
-# 5700 every 100 ms. The pilot wins any axis whose stick or trigger is outside
-# the Teensy's dead zone, a demand older than 250 ms counts as zero, and every
-# demand is capped.
+# (surge, sway, heave, yaw) to UDP 5701 at 10 Hz; this file merges it into a
+# COPY of the pilot's inputs just before nmea_encode, and sends NEPI a status
+# to UDP 5700 every 100 ms. Every demand is capped.
 #
-# The toggle is BENCH_SETUP_PLAN.md D3 option (c), which Victoria has not
-# confirmed yet (V10). NEPI turns assist on with a rising edge of the demand's
-# `active` flag, so NEPI must send active false before active true. Assist
-# turns off when NEPI sends active false, when the pilot presses
-# NEPI_ASSIST_BUTTON (RB), or after 2 s with no accepted demand. After the
-# button or the timeout, only a fresh false-then-true edge turns it back on.
-# Where this differs from LINK_PROTOCOL.md, the difference is listed under
-# "Doc Changes Pending" in BENCH_SETUP_PLAN.md.
+# NEPI control (BENCH_SETUP_PLAN.md D3, decided 2026-10-22): the pilot flies,
+# and pressing NEPI_ASSIST_BUTTON (RB) hands the ROV to NEPI. In NEPI control,
+# NEPI owns every movement input (LY, LX, RY, LT, RT): the ROV follows NEPI's
+# demand, whether that comes from NEPI's stabilization process or an operator
+# on NEPI's Robots page, and a demand older than 250 ms means neutral. RY
+# carries NEPI's heave; while heave is 0, RY is 0 and the Teensy's own depth
+# hold keeps the depth, the same as when the pilot centers the stick. Buttons,
+# the D-pad, RX and LB pass through, so the pilot can still work tools. NEPI
+# control ends when the pilot presses RB again, when the pilot moves any
+# movement input past NEPI_TAKEOVER_FRACTION of its travel (the safety exit),
+# when NEPI sends active false, or after 2 s with no accepted demand. NEPI
+# never turns it on: `active` true only means NEPI is connected and ready, and
+# RB is ignored while it is not.
 #
 # Config: a flat "KEY: value" file with the LINK_PROTOCOL "Pi Configuration"
 # keys. The first file that exists wins: $NEPI_LINK_CONFIG, nepi_link.yaml
@@ -85,12 +88,15 @@ DEFAULT_CONFIG = {
     'NEPI_ASSIST_BUTTON': 'BTN_TR',
     'NEPI_MAX_SURGE': 0.2,
     'NEPI_MAX_SWAY': 0.2,
+    'NEPI_MAX_HEAVE': 0.2,
     'NEPI_MAX_YAW': 0.1,
     'NEPI_SURGE_SIGN': 1,
     'NEPI_SWAY_SIGN': 1,
+    'NEPI_HEAVE_SIGN': 1,
     'NEPI_YAW_SIGN': 1,
     'NEPI_TRIGGER_DEADZONE': 10,
     'NEPI_TRIGGER_MAX': 255,
+    'NEPI_TAKEOVER_FRACTION': 0.25,
 }
 
 # Names for the 20 values of a $TNCTL line (LINK_PROTOCOL "Teensy telemetry").
@@ -113,6 +119,7 @@ MAX_DATAGRAM_BYTES = 1200 # LINK_PROTOCOL "Rules for Every Message", rule 1
 SEQ_MAX = 4294967295
 STATUS_PERIOD_SEC = 0.1
 DEMAND_STALE_SEC = 0.25 # An older demand counts as 0 on every axis
+NEPI_READY_SEC = 0.5 # NEPI is ready while an active true demand was accepted within this
 ASSIST_TIMEOUT_SEC = 2.0 # Assist turns off after this long with no accepted demand
 SEQ_RESTART_SEC = 1.0 # After this long, any seq is accepted (sender restarted)
 ERROR_PRINT_SEC = 10.0 # Each kind of message prints at most once per this period
@@ -315,20 +322,32 @@ def validate_config(config):
     if not isinstance(button, str) or button not in EVENT_SLOTS or not button.startswith('BTN_') or button == 'BTN_TL':
         return None, 'NEPI_ASSIST_BUTTON must be BTN_TR (RB); BTN_TL is slow mode: link off'
     settings['assist_slot'] = EVENT_SLOTS[button]
-    for key in ['NEPI_MAX_SURGE', 'NEPI_MAX_SWAY', 'NEPI_MAX_YAW']:
+    for key in ['NEPI_MAX_SURGE', 'NEPI_MAX_SWAY', 'NEPI_MAX_HEAVE', 'NEPI_MAX_YAW']:
         if not isNumber(settings[key]) or settings[key] < 0 or settings[key] > 1:
             return None, key + ' must be a number from 0 to 1: link off'
         settings[key] = float(settings[key])
-    for key in ['NEPI_SURGE_SIGN', 'NEPI_SWAY_SIGN', 'NEPI_YAW_SIGN']:
+    for key in ['NEPI_SURGE_SIGN', 'NEPI_SWAY_SIGN', 'NEPI_HEAVE_SIGN', 'NEPI_YAW_SIGN']:
         if not isInteger(settings[key]) or settings[key] not in (1, -1):
             return None, key + ' must be 1 or -1: link off'
     deadzone = settings['NEPI_TRIGGER_DEADZONE']
     maximum = settings['NEPI_TRIGGER_MAX']
     if not isInteger(deadzone) or not isInteger(maximum) or deadzone < 1 or maximum <= deadzone:
         return None, 'NEPI_TRIGGER_DEADZONE and NEPI_TRIGGER_MAX must be integers with 1 <= dead zone < max: link off'
+    fraction = settings['NEPI_TAKEOVER_FRACTION']
+    if not isNumber(fraction) or fraction <= 0 or fraction > 1:
+        return None, 'NEPI_TAKEOVER_FRACTION must be a number above 0 and at most 1: link off'
+    settings['NEPI_TAKEOVER_FRACTION'] = float(fraction)
+    # A movement input at or past these ends NEPI control
+    settings['takeover_stick'] = int(math.ceil(fraction * STICK_MAX))
+    settings['takeover_trigger'] = int(math.ceil(fraction * maximum))
+    if settings['takeover_stick'] <= STICK_DEADZONE or settings['takeover_trigger'] <= deadzone:
+        return None, ('NEPI_TAKEOVER_FRACTION must put the takeover point past the stick and trigger '
+                      'dead zones: link off')
     return settings, ('On: NEPI ' + settings['NEPI_LAN_IP'] + ', status to UDP ' + str(settings['NEPI_STATUS_UDP_PORT']) +
                       ', demands on UDP ' + str(settings['NEPI_DEMAND_UDP_PORT']) +
-                      ', triggers ' + str(deadzone) + ' to ' + str(maximum))
+                      ', triggers ' + str(deadzone) + ' to ' + str(maximum) +
+                      ', takeover at stick ' + str(settings['takeover_stick']) +
+                      ' and trigger ' + str(settings['takeover_trigger']))
 
 
 #**********************
@@ -356,8 +375,8 @@ def parse_demand(datagram, source_ip, nepi_ip):
 
     Returns:
         list: [demand (dict or None), msg (str)]. demand holds seq, active,
-            surge, sway and yaw, or is None when the datagram must be dropped,
-            with the reason in msg.
+            surge, sway, heave and yaw, or is None when the datagram must be
+            dropped, with the reason in msg.
     """
     if source_ip != nepi_ip:
         return None, 'Demand from ' + str(source_ip) + ' dropped: only ' + nepi_ip + ' may send demands'
@@ -384,8 +403,13 @@ def parse_demand(datagram, source_ip, nepi_ip):
         value = message.get(name)
         if not isNumber(value) or value < -1 or value > 1:
             return None, 'Demand dropped: ' + name + ' must be a finite number from -1 to 1'
+    # heave joined version 1 after the other axes, so a demand without it is
+    # still accepted and means 0 (rule 3: version 1 can gain fields)
+    heave = message.get('heave', 0.0)
+    if not isNumber(heave) or heave < -1 or heave > 1:
+        return None, 'Demand dropped: heave must be a finite number from -1 to 1'
     demand = dict(seq = seq, active = message['active'], surge = float(message['surge']),
-                  sway = float(message['sway']), yaw = float(message['yaw']))
+                  sway = float(message['sway']), heave = float(heave), yaw = float(message['yaw']))
     return demand, 'Accepted'
 
 def parse_teensy_line(line):
@@ -455,7 +479,8 @@ class NepiLink(object):
 
     The team's main loop, the demand receiver thread and the status sender
     thread all touch the same state, so all of it sits behind one lock.
-    Methods named ...Locked expect the caller to hold it. clock is a
+    Methods named ...Locked expect the caller to hold it; messages they want
+    printed go in pending_msgs, printed once the lock is released. clock is a
     monotonic seconds function, injectable so tests can control time;
     wall_clock fills the status `t` field; log prints messages.
     """
@@ -475,10 +500,10 @@ class NepiLink(object):
         self.resetStateLocked()
 
     def resetStateLocked(self):
-        self.assist = False
+        self.assist = False # NEPI control
         self.assist_reason = 'start'
-        self.prev_active = None # active of the previous accepted demand; None before the first
         self.assist_btn_avl = True
+        self.pending_msgs = [] # [key, msg] pairs for printLimited, once the lock is released
         self.slow = False
         self.slow_btn_avl = True
         self.pilot_surge = False
@@ -487,6 +512,7 @@ class NepiLink(object):
         self.pilot_depth = False
         self.out_lx = 0
         self.out_ly = 0
+        self.out_ry = 0
         self.out_lt = 0
         self.out_rt = 0
         self.demand = None
@@ -607,12 +633,18 @@ class NepiLink(object):
 
         Returns:
             tuple: The inputs to encode for the Teensy. tuple(gamepad_inputs)
-                unchanged while the link or assist is off, while the demand is
-                older than 250 ms, and on any error.
+                unchanged while the link or NEPI control is off, and on any
+                error. In NEPI control, the movement inputs carry NEPI's
+                demand, or neutral while the demand is older than 250 ms.
         """
         try:
             with self.lock:
-                return self.mergeLocked(gamepad_inputs, self.clock())
+                merged = self.mergeLocked(gamepad_inputs, self.clock())
+                pending = self.pending_msgs
+                self.pending_msgs = []
+            for [key, msg] in pending:
+                self.printLimited(key, msg)
+            return merged
         except Exception as e:
             self.reportError('merge_inputs', e)
             return safeTuple(gamepad_inputs)
@@ -622,24 +654,28 @@ class NepiLink(object):
         settings = self.settings
         if settings is None:
             return pilot
-        self.updatePilotLocked(pilot)
+        self.updatePilotLocked(pilot, now)
         self.checkTimeoutLocked(now)
         merged = pilot
-        if self.assist and self.demandFreshLocked(now):
+        if self.assist:
+            # NEPI owns every movement input. The pilot's own are all short of
+            # the takeover point here (past it, updatePilotLocked ended NEPI
+            # control), so they are replaced, not mixed in. A stale demand
+            # leaves every axis neutral, and RY at 0 lets the Teensy hold depth.
             out = list(pilot)
-            demand = self.demand
-            if abs(pilot[LY_SLOT]) < STICK_DEADZONE:
+            for slot in [LY_SLOT, LX_SLOT, RY_SLOT, LT_SLOT, RT_SLOT]:
+                out[slot] = 0
+            if self.demandFreshLocked(now):
+                demand = self.demand
                 out[LY_SLOT] = stick_value(clampDemand(demand['surge'], settings['NEPI_MAX_SURGE']) *
                                            settings['NEPI_SURGE_SIGN'])
-            if abs(pilot[LX_SLOT]) < STICK_DEADZONE:
                 out[LX_SLOT] = stick_value(clampDemand(demand['sway'], settings['NEPI_MAX_SWAY']) *
                                            settings['NEPI_SWAY_SIGN'])
-            deadzone = settings['NEPI_TRIGGER_DEADZONE']
-            maximum = settings['NEPI_TRIGGER_MAX']
-            if pilot[LT_SLOT] < deadzone and pilot[RT_SLOT] < deadzone:
+                out[RY_SLOT] = stick_value(clampDemand(demand['heave'], settings['NEPI_MAX_HEAVE']) *
+                                           settings['NEPI_HEAVE_SIGN'])
+                deadzone = settings['NEPI_TRIGGER_DEADZONE']
+                maximum = settings['NEPI_TRIGGER_MAX']
                 yaw = clampDemand(demand['yaw'], settings['NEPI_MAX_YAW']) * settings['NEPI_YAW_SIGN']
-                out[LT_SLOT] = 0
-                out[RT_SLOT] = 0
                 if yaw > 0:
                     out[LT_SLOT] = trigger_value(yaw, deadzone, maximum)
                 elif yaw < 0:
@@ -647,12 +683,14 @@ class NepiLink(object):
             merged = tuple(out)
         self.out_lx = merged[LX_SLOT]
         self.out_ly = merged[LY_SLOT]
+        self.out_ry = merged[RY_SLOT]
         self.out_lt = merged[LT_SLOT]
         self.out_rt = merged[RT_SLOT]
         return merged
 
-    def updatePilotLocked(self, pilot):
-        deadzone = self.settings['NEPI_TRIGGER_DEADZONE']
+    def updatePilotLocked(self, pilot, now):
+        settings = self.settings
+        deadzone = settings['NEPI_TRIGGER_DEADZONE']
         self.pilot_surge = abs(pilot[LY_SLOT]) >= STICK_DEADZONE
         self.pilot_sway = abs(pilot[LX_SLOT]) >= STICK_DEADZONE
         self.pilot_yaw = pilot[LT_SLOT] >= deadzone or pilot[RT_SLOT] >= deadzone
@@ -664,13 +702,40 @@ class NepiLink(object):
             self.slow_btn_avl = False
         else:
             self.slow_btn_avl = True
-        # The assist button, same pattern. It only ever turns assist off.
-        if pilot[self.settings['assist_slot']]:
-            if self.assist_btn_avl and self.assist:
-                self.setAssistLocked(False, 'pilot_button')
+        # The safety exit: any movement input past the takeover point ends NEPI control
+        takeover = self.takeoverInputLocked(pilot)
+        if self.assist and takeover is not None:
+            self.setAssistLocked(False, 'pilot_stick')
+            self.pending_msgs.append(['takeover', 'nepi_link: NEPI control off: the pilot moved ' + takeover])
+        # The assist button toggles NEPI control, same "button available" pattern
+        if pilot[settings['assist_slot']]:
+            if self.assist_btn_avl:
+                self.toggleAssistLocked(takeover, now)
             self.assist_btn_avl = False
         else:
             self.assist_btn_avl = True
+
+    def takeoverInputLocked(self, pilot):
+        # The name of the first movement input at or past the takeover point, or None
+        stick = self.settings['takeover_stick']
+        trigger = self.settings['takeover_trigger']
+        for [name, slot] in [['LY', LY_SLOT], ['LX', LX_SLOT], ['RY', RY_SLOT]]:
+            if abs(pilot[slot]) >= stick:
+                return name
+        for [name, slot] in [['LT', LT_SLOT], ['RT', RT_SLOT]]:
+            if pilot[slot] >= trigger:
+                return name
+        return None
+
+    def toggleAssistLocked(self, takeover, now):
+        if self.assist:
+            self.setAssistLocked(False, 'pilot_button')
+        elif not self.nepiReadyLocked(now):
+            self.pending_msgs.append(['button', 'nepi_link: RB ignored: NEPI is not connected'])
+        elif takeover is not None:
+            self.pending_msgs.append(['button', 'nepi_link: RB ignored: release ' + takeover + ' first'])
+        else:
+            self.setAssistLocked(True, 'pilot_button')
 
     def setAssistLocked(self, on, reason):
         if self.assist == on:
@@ -686,8 +751,12 @@ class NepiLink(object):
     def demandFreshLocked(self, now):
         return self.demand_time is not None and now - self.demand_time <= DEMAND_STALE_SEC
 
+    def nepiReadyLocked(self, now):
+        return (self.demand is not None and self.demand['active'] and
+                now - self.demand_time <= NEPI_READY_SEC)
+
     def handle_demand(self, datagram, source_ip):
-        """Validate one demand datagram and apply it, including the toggle.
+        """Validate one demand datagram and apply it. Active false ends NEPI control.
 
         Args:
             datagram (bytes): The UDP payload.
@@ -719,13 +788,9 @@ class NepiLink(object):
         self.demand = demand
         self.demand_seq = demand['seq']
         self.demand_time = now
-        if demand['active']:
-            # Only a rising edge turns assist on; with no previous demand there is no edge
-            if self.prev_active is False:
-                self.setAssistLocked(True, 'nepi_on')
-        else:
+        # Active true only marks NEPI ready; only the pilot's button turns NEPI control on
+        if not demand['active']:
             self.setAssistLocked(False, 'nepi_off')
-        self.prev_active = demand['active']
         return True, msg
 
     def on_teensy_line(self, line):
@@ -751,12 +816,14 @@ class NepiLink(object):
             self.reportError('on_teensy_line', e)
 
     def topside_tag(self):
-        """Return the assist state for the pilot's $RPCTL line.
+        """Return the NEPI control state for the pilot's $RPCTL line.
 
         Returns:
-            str: ',NEPI:OFF', ',NEPI:ON', or ',NEPI:WAIT' (assist on, demand
-                older than 250 ms). An empty string when the link is off or
-                on any error, so the pilot's line is unchanged.
+            str: ',NEPI:ON', ',NEPI:WAIT' (NEPI control on, demand older than
+                250 ms), ',NEPI:OFF' (off, NEPI ready, so RB hands over) or
+                ',NEPI:NOTREADY' (off, NEPI not connected, so RB does nothing).
+                An empty string when the link is off or on any error, so the
+                pilot's line is unchanged.
         """
         try:
             with self.lock:
@@ -765,7 +832,9 @@ class NepiLink(object):
                 now = self.clock()
                 self.checkTimeoutLocked(now)
                 if not self.assist:
-                    return ',NEPI:OFF'
+                    if self.nepiReadyLocked(now):
+                        return ',NEPI:OFF'
+                    return ',NEPI:NOTREADY'
                 if self.demandFreshLocked(now):
                     return ',NEPI:ON'
                 return ',NEPI:WAIT'
@@ -798,10 +867,11 @@ class NepiLink(object):
         # The out_* ranges are part of the contract, so a pilot value past
         # them (a controller or config mismatch) is reported at the limit.
         return dict(v = 1, type = 'status', seq = self.status_seq, t = round(self.wall_clock(), 3),
-                    assist = self.assist, assist_reason = self.assist_reason,
+                    assist = self.assist, assist_reason = self.assist_reason, nepi_ready = self.nepiReadyLocked(now),
                     pilot_surge = self.pilot_surge, pilot_sway = self.pilot_sway,
                     pilot_yaw = self.pilot_yaw, pilot_depth = self.pilot_depth, slow = self.slow,
                     out_lx = clampInt(self.out_lx, -32768, 32767), out_ly = clampInt(self.out_ly, -32768, 32767),
+                    out_ry = clampInt(self.out_ry, -32768, 32767),
                     out_lt = clampInt(self.out_lt, 0, trigger_max), out_rt = clampInt(self.out_rt, 0, trigger_max),
                     demand_seq = self.demand_seq, demand_age_ms = ageMs(now, self.demand_time),
                     demand_bad = self.demand_bad,
@@ -922,7 +992,7 @@ def merge_inputs(gamepad_inputs):
 
     Returns:
         tuple: The merged inputs, or tuple(gamepad_inputs) unchanged when the
-            link or assist is off, or on any error.
+            link or NEPI control is off, or on any error.
     """
     try:
         return _bridge.merge_inputs(gamepad_inputs)
@@ -941,7 +1011,7 @@ def on_teensy_line(line):
         pass
 
 def topside_tag():
-    """Return ',NEPI:OFF', ',NEPI:ON' or ',NEPI:WAIT' for the pilot's line.
+    """Return ',NEPI:ON', ',NEPI:WAIT', ',NEPI:OFF' or ',NEPI:NOTREADY' for the pilot's line.
 
     Returns:
         str: The tag, or an empty string when the link is off or on any error.

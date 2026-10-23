@@ -35,8 +35,10 @@ import fake_nepi
 NEPI = '192.168.68.23'
 BENCH_LINE = '$TNCTL,0,0,0,0,100,100,100,100,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,*FF'
 STATUS_FIELDS = ['v', 'type', 'seq', 't', 'assist', 'pilot_surge', 'pilot_sway', 'pilot_yaw', 'pilot_depth',
-                 'slow', 'out_lx', 'out_ly', 'out_lt', 'out_rt', 'demand_seq', 'demand_age_ms', 'demand_bad',
-                 'tn', 'tn_age_ms', 'tn_count', 'tn_bad', 'assist_reason']
+                 'slow', 'out_lx', 'out_ly', 'out_ry', 'out_lt', 'out_rt', 'demand_seq', 'demand_age_ms', 'demand_bad',
+                 'tn', 'tn_age_ms', 'tn_count', 'tn_bad', 'assist_reason', 'nepi_ready']
+TAKEOVER_STICK = 8192 # NEPI_TAKEOVER_FRACTION 0.25 of 32767, rounded up
+TAKEOVER_TRIGGER = 64 # 0.25 of the default NEPI_TRIGGER_MAX 255, rounded up
 
 
 class FakeClock(object):
@@ -80,14 +82,16 @@ def pilot(lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0, lb = 0, rb = 0):
     inputs[nepi_link.RB_SLOT] = rb
     return inputs
 
-def engage(link, clock, surge = 0.0, sway = 0.0, yaw = 0.0, seq = 0):
-    # The D3 option (c) rising edge: active false, then active true
-    link.handle_demand(demandBytes(seq, False), NEPI)
-    clock.advance(0.1)
-    [accepted, msg] = link.handle_demand(demandBytes(seq + 1, True, surge, sway, yaw), NEPI)
+def engage(link, clock, surge = 0.0, sway = 0.0, yaw = 0.0, seq = 0, heave = 0.0):
+    # NEPI is ready (an active true demand), then the pilot presses and releases RB
+    [accepted, msg] = link.handle_demand(demandBytes(seq, True, surge, sway, yaw, heave = heave), NEPI)
     if not accepted:
         raise AssertionError('engage demand dropped: ' + msg)
-    return seq + 2
+    link.merge_inputs(pilot(rb = 1))
+    link.merge_inputs(pilot())
+    if not link.build_status()['assist']:
+        raise AssertionError('RB did not turn NEPI control on')
+    return seq + 1
 
 def freeUdpPort():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -152,48 +156,94 @@ class TestMapping(unittest.TestCase):
 
     def test_tiny_and_zero_demands_send_zero(self):
         link, clock, logs = makeLink()
-        engage(link, clock, surge = 0.005, sway = 0.0, yaw = 0.0)
-        out = link.merge_inputs(pilot(ly = 1500, lx = -2000, lt = 5, rt = 3))
+        engage(link, clock, surge = 0.005, sway = 0.0, yaw = 0.0, heave = -0.005)
+        out = link.merge_inputs(pilot(ly = 1500, lx = -2000, ry = 2500, lt = 5, rt = 3))
         self.assertEqual(out[nepi_link.LY_SLOT], 0)
         self.assertEqual(out[nepi_link.LX_SLOT], 0)
+        self.assertEqual(out[nepi_link.RY_SLOT], 0)
         self.assertEqual(out[nepi_link.LT_SLOT], 0)
         self.assertEqual(out[nepi_link.RT_SLOT], 0)
 
+    def test_heave_drives_ry_with_its_cap_and_sign(self):
+        link, clock, logs = makeLink()
+        engage(link, clock, heave = 1.0)
+        out = link.merge_inputs(pilot())
+        self.assertEqual(out[nepi_link.RY_SLOT], 8713) # NEPI_MAX_HEAVE 0.2
+        self.assertEqual(link.build_status()['out_ry'], 8713)
+        link, clock, logs = makeLink(NEPI_MAX_HEAVE = 1.0, NEPI_HEAVE_SIGN = -1)
+        engage(link, clock, heave = 0.2)
+        self.assertEqual(link.merge_inputs(pilot())[nepi_link.RY_SLOT], -8713)
+        link, clock, logs = makeLink()
+        engage(link, clock, heave = -0.1)
+        self.assertEqual(link.merge_inputs(pilot())[nepi_link.RY_SLOT], nepi_link.stick_value(-0.1))
 
-class TestOverride(unittest.TestCase):
+    def test_demand_without_heave_holds_depth(self):
+        # A sender from before heave existed: accepted, and RY stays 0
+        link, clock, logs = makeLink()
+        engage(link, clock, surge = 0.2)
+        datagram = demandBytes(1, True, 0.2)
+        self.assertNotIn(b'heave', datagram)
+        [accepted, msg] = link.handle_demand(datagram, NEPI)
+        self.assertTrue(accepted, msg)
+        out = link.merge_inputs(pilot(ry = 2500))
+        self.assertEqual((out[nepi_link.LY_SLOT], out[nepi_link.RY_SLOT]), (8713, 0))
+
+
+class TestNepiControl(unittest.TestCase):
 
     def setUp(self):
         self.link, self.clock, self.logs = makeLink()
         engage(self.link, self.clock, surge = 0.2, sway = 0.2, yaw = 0.1)
 
-    def test_pilot_ly_wins_surge_only(self):
-        out = self.link.merge_inputs(pilot(ly = 5000))
-        self.assertEqual(out[nepi_link.LY_SLOT], 5000)
-        self.assertEqual(out[nepi_link.LX_SLOT], 8713)
-        self.assertEqual(out[nepi_link.LT_SLOT], 32)
-        # abs(LY) >= 3000 is outside the dead zone, on both sides
-        self.assertEqual(self.link.merge_inputs(pilot(ly = 3000))[nepi_link.LY_SLOT], 3000)
-        self.assertEqual(self.link.merge_inputs(pilot(ly = -3000))[nepi_link.LY_SLOT], -3000)
+    def state(self):
+        status = self.link.build_status()
+        return status['assist'], status['assist_reason']
 
-    def test_pilot_lx_wins_sway_only(self):
-        out = self.link.merge_inputs(pilot(lx = -3000))
-        self.assertEqual(out[nepi_link.LX_SLOT], -3000)
-        self.assertEqual(out[nepi_link.LY_SLOT], 8713)
-        self.assertEqual(out[nepi_link.LT_SLOT], 32)
-
-    def test_pilot_trigger_wins_yaw_only(self):
-        out = self.link.merge_inputs(pilot(lt = 10))
-        self.assertEqual((out[nepi_link.LT_SLOT], out[nepi_link.RT_SLOT]), (10, 0))
-        self.assertEqual(out[nepi_link.LY_SLOT], 8713)
-        out = self.link.merge_inputs(pilot(rt = 200))
-        self.assertEqual((out[nepi_link.LT_SLOT], out[nepi_link.RT_SLOT]), (0, 200))
-        self.assertEqual(out[nepi_link.LX_SLOT], 8713)
-
-    def test_inside_dead_zone_nepi_wins(self):
-        out = self.link.merge_inputs(pilot(ly = -2999, lx = 2999, lt = 9, rt = 9))
+    def test_pilot_inputs_short_of_takeover_are_replaced(self):
+        # Past the Teensy's dead zone but short of the takeover point: NEPI keeps every axis
+        out = self.link.merge_inputs(pilot(ly = TAKEOVER_STICK - 1, lx = -5000, ry = 4000, lt = TAKEOVER_TRIGGER - 1))
         self.assertEqual(out[nepi_link.LY_SLOT], 8713)
         self.assertEqual(out[nepi_link.LX_SLOT], 8713)
+        self.assertEqual(out[nepi_link.RY_SLOT], 0)
         self.assertEqual((out[nepi_link.LT_SLOT], out[nepi_link.RT_SLOT]), (32, 0))
+        self.assertEqual(self.state(), (True, 'pilot_button'))
+
+    def test_each_stick_past_takeover_ends_nepi_control(self):
+        for [name, value] in [['ly', TAKEOVER_STICK], ['ly', -TAKEOVER_STICK], ['lx', TAKEOVER_STICK],
+                              ['lx', -TAKEOVER_STICK], ['ry', TAKEOVER_STICK], ['ry', -TAKEOVER_STICK]]:
+            link, clock, logs = makeLink()
+            engage(link, clock, surge = 0.2)
+            inputs = pilot(**{name: value})
+            self.assertEqual(link.merge_inputs(inputs), tuple(inputs), name)
+            status = link.build_status()
+            self.assertEqual((status['assist'], status['assist_reason']), (False, 'pilot_stick'), name)
+            self.assertIn('the pilot moved ' + name.upper(), logs[-1])
+
+    def test_each_trigger_past_takeover_ends_nepi_control(self):
+        for name in ['lt', 'rt']:
+            link, clock, logs = makeLink()
+            engage(link, clock, yaw = 0.1)
+            inputs = pilot(**{name: TAKEOVER_TRIGGER})
+            self.assertEqual(link.merge_inputs(inputs), tuple(inputs), name)
+            self.assertEqual(link.build_status()['assist_reason'], 'pilot_stick', name)
+
+    def test_takeover_point_follows_the_trigger_max(self):
+        link, clock, logs = makeLink(NEPI_TRIGGER_DEADZONE = 40, NEPI_TRIGGER_MAX = 1023)
+        engage(link, clock)
+        link.merge_inputs(pilot(lt = 255)) # 0.25 of 1023 is 255.75, so 256 is the takeover point
+        self.assertTrue(link.build_status()['assist'])
+        link.merge_inputs(pilot(lt = 256))
+        self.assertEqual(link.build_status()['assist_reason'], 'pilot_stick')
+
+    def test_after_takeover_only_rb_turns_it_back_on(self):
+        self.link.merge_inputs(pilot(ly = 20000))
+        self.link.merge_inputs(pilot())
+        self.clock.advance(0.1)
+        self.link.handle_demand(demandBytes(10, True, 0.2), NEPI)
+        self.link.merge_inputs(pilot())
+        self.assertEqual(self.state(), (False, 'pilot_stick'))
+        self.link.merge_inputs(pilot(rb = 1))
+        self.assertEqual(self.state(), (True, 'pilot_button'))
 
     def test_other_inputs_pass_through_and_pilot_list_untouched(self):
         inputs = list(range(100, 118))
@@ -209,8 +259,8 @@ class TestOverride(unittest.TestCase):
         self.assertIsInstance(out, tuple)
         self.assertEqual(len(out), 18)
         changed = [i for i in range(18) if out[i] != inputs[i]]
-        self.assertEqual(changed, [nepi_link.LX_SLOT, nepi_link.LY_SLOT, nepi_link.LT_SLOT])
-        self.assertEqual(out[nepi_link.RY_SLOT], inputs[nepi_link.RY_SLOT])
+        self.assertEqual(changed, [nepi_link.LX_SLOT, nepi_link.LY_SLOT, nepi_link.RY_SLOT, nepi_link.LT_SLOT])
+        self.assertEqual(out[nepi_link.RY_SLOT], 0)
         self.assertEqual(out[nepi_link.RX_SLOT], inputs[nepi_link.RX_SLOT])
 
     def test_status_reports_pilot_flags_and_outputs(self):
@@ -220,7 +270,8 @@ class TestOverride(unittest.TestCase):
         self.assertFalse(status['pilot_sway'])
         self.assertTrue(status['pilot_yaw'])
         self.assertTrue(status['pilot_depth'])
-        self.assertEqual((status['out_ly'], status['out_lx'], status['out_lt'], status['out_rt']), (5000, 8713, 0, 10))
+        self.assertTrue(status['assist'])
+        self.assertEqual((status['out_ly'], status['out_lx'], status['out_lt'], status['out_rt']), (8713, 8713, 32, 0))
 
 
 class TestTimeouts(unittest.TestCase):
@@ -229,17 +280,17 @@ class TestTimeouts(unittest.TestCase):
         self.link, self.clock, self.logs = makeLink()
         self.seq = engage(self.link, self.clock, surge = 0.2)
 
-    def test_demand_older_than_250_ms_passes_pilot_through_with_wait(self):
+    def test_demand_older_than_250_ms_goes_neutral_with_wait(self):
         self.clock.advance(0.24)
         self.assertEqual(self.link.topside_tag(), ',NEPI:ON')
         self.assertEqual(self.link.merge_inputs(pilot(ly = 1500))[nepi_link.LY_SLOT], 8713)
         self.clock.advance(0.02)
-        inputs = pilot(ly = 1500, lx = -100)
-        self.assertEqual(self.link.merge_inputs(inputs), tuple(inputs))
+        out = self.link.merge_inputs(pilot(ly = 1500, lx = -100, ry = 2000))
+        self.assertEqual((out[nepi_link.LY_SLOT], out[nepi_link.LX_SLOT], out[nepi_link.RY_SLOT]), (0, 0, 0))
         self.assertEqual(self.link.topside_tag(), ',NEPI:WAIT')
         status = self.link.build_status()
         self.assertTrue(status['assist'])
-        self.assertEqual(status['out_ly'], 1500)
+        self.assertEqual(status['out_ly'], 0)
         self.assertEqual(status['demand_age_ms'], 260)
         # A fresh demand restores NEPI's axes
         self.link.handle_demand(demandBytes(self.seq, True, 0.2), NEPI)
@@ -251,7 +302,7 @@ class TestTimeouts(unittest.TestCase):
         self.assertEqual(self.link.topside_tag(), ',NEPI:WAIT')
         self.assertTrue(self.link.build_status()['assist'])
         self.clock.advance(0.04)
-        self.assertEqual(self.link.topside_tag(), ',NEPI:OFF')
+        self.assertEqual(self.link.topside_tag(), ',NEPI:NOTREADY')
         status = self.link.build_status()
         self.assertFalse(status['assist'])
         self.assertEqual(status['assist_reason'], 'timeout')
@@ -272,79 +323,94 @@ class TestToggle(unittest.TestCase):
         status = self.link.build_status()
         return status['assist'], status['assist_reason']
 
-    def test_assist_starts_off(self):
+    def test_starts_off_and_not_ready(self):
         self.assertEqual(self.state(), (False, 'start'))
-        self.assertEqual(self.link.topside_tag(), ',NEPI:OFF')
+        self.assertFalse(self.link.build_status()['nepi_ready'])
+        self.assertEqual(self.link.topside_tag(), ',NEPI:NOTREADY')
         inputs = pilot(ly = 100)
         self.assertEqual(self.link.merge_inputs(inputs), tuple(inputs))
 
-    def test_first_demand_active_true_does_not_turn_assist_on(self):
-        [accepted, msg] = self.link.handle_demand(demandBytes(0, True, 0.2), NEPI)
-        self.assertTrue(accepted)
-        self.assertEqual(self.state(), (False, 'start'))
-        self.assertEqual(self.link.merge_inputs(pilot())[nepi_link.LY_SLOT], 0)
-        self.clock.advance(0.1)
-        self.link.handle_demand(demandBytes(1, True, 0.2), NEPI)
-        self.assertEqual(self.state(), (False, 'start'))
-
-    def test_rising_edge_turns_on_and_active_false_turns_off(self):
-        self.link.handle_demand(demandBytes(0, False), NEPI)
-        self.assertEqual(self.state(), (False, 'start'))
-        self.link.assist_event.clear()
-        self.link.handle_demand(demandBytes(1, True, 0.2), NEPI)
-        self.assertEqual(self.state(), (True, 'nepi_on'))
-        self.assertTrue(self.link.assist_event.is_set()) # The status goes out at once
-        self.assertEqual(self.link.topside_tag(), ',NEPI:ON')
-        self.link.handle_demand(demandBytes(2, False), NEPI)
-        self.assertEqual(self.state(), (False, 'nepi_off'))
-
-    def test_pilot_button_turns_off_and_needs_a_fresh_edge(self):
-        seq = engage(self.link, self.clock, surge = 0.2)
-        out = self.link.merge_inputs(pilot(rb = 1))
-        self.assertEqual(out[nepi_link.RB_SLOT], 1) # RB still reaches the Teensy
-        self.assertEqual(out[nepi_link.LY_SLOT], 0)
-        self.assertEqual(self.state(), (False, 'pilot_button'))
-        self.assertEqual(self.link.topside_tag(), ',NEPI:OFF')
-        # NEPI keeps sending active true: assist stays off
-        for i in range(5):
+    def test_active_true_alone_never_turns_nepi_control_on(self):
+        for seq in range(5):
+            [accepted, msg] = self.link.handle_demand(demandBytes(seq, True, 0.2), NEPI)
+            self.assertTrue(accepted, msg)
+            self.assertEqual(self.link.merge_inputs(pilot())[nepi_link.LY_SLOT], 0)
             self.clock.advance(0.1)
-            self.link.handle_demand(demandBytes(seq + i, True, 0.2), NEPI)
-            self.link.merge_inputs(pilot())
+        self.assertEqual(self.state(), (False, 'start'))
+        self.assertTrue(self.link.build_status()['nepi_ready'])
+        self.assertEqual(self.link.topside_tag(), ',NEPI:OFF')
+
+    def test_rb_toggles_nepi_control(self):
+        self.link.handle_demand(demandBytes(0, True, 0.2), NEPI)
+        self.link.assist_event.clear()
+        out = self.link.merge_inputs(pilot(rb = 1))
+        self.assertEqual(self.state(), (True, 'pilot_button'))
+        self.assertTrue(self.link.assist_event.is_set()) # The status goes out at once
+        self.assertEqual(out[nepi_link.RB_SLOT], 1) # RB still reaches the Teensy
+        self.assertEqual(out[nepi_link.LY_SLOT], 8713)
+        self.assertEqual(self.link.topside_tag(), ',NEPI:ON')
+        self.link.merge_inputs(pilot())
+        out = self.link.merge_inputs(pilot(rb = 1))
         self.assertEqual(self.state(), (False, 'pilot_button'))
-        # A fresh false-then-true edge turns it back on
-        engage(self.link, self.clock, surge = 0.2, seq = seq + 5)
-        self.assertEqual(self.state(), (True, 'nepi_on'))
+        self.assertEqual(out[nepi_link.LY_SLOT], 0)
+        self.assertEqual(self.link.topside_tag(), ',NEPI:OFF')
+
+    def test_rb_ignored_while_nepi_is_not_ready(self):
+        # No demand yet
+        self.link.merge_inputs(pilot(rb = 1))
+        self.link.merge_inputs(pilot())
+        self.assertEqual(self.state(), (False, 'start'))
+        self.assertIn('NEPI is not connected', self.logs[-1])
+        # NEPI's newest demand is active false
+        self.link.handle_demand(demandBytes(0, False), NEPI)
+        self.link.merge_inputs(pilot(rb = 1))
+        self.link.merge_inputs(pilot())
+        self.assertEqual(self.state(), (False, 'start'))
+        # NEPI's newest active true is older than 0.5 s
+        self.link.handle_demand(demandBytes(1, True), NEPI)
+        self.clock.advance(0.51)
+        self.assertEqual(self.link.topside_tag(), ',NEPI:NOTREADY')
+        self.link.merge_inputs(pilot(rb = 1))
+        self.assertEqual(self.state(), (False, 'start'))
+
+    def test_rb_ignored_while_a_movement_input_is_past_takeover(self):
+        self.link.handle_demand(demandBytes(0, True), NEPI)
+        self.link.merge_inputs(pilot(rb = 1, rt = TAKEOVER_TRIGGER))
+        self.assertEqual(self.state(), (False, 'start'))
+        self.assertIn('release RT first', self.logs[-1])
 
     def test_held_button_counts_once(self):
         engage(self.link, self.clock, surge = 0.2)
-        self.link.merge_inputs(pilot(rb = 1))
+        for i in range(3):
+            self.link.merge_inputs(pilot(rb = 1))
         self.assertEqual(self.state(), (False, 'pilot_button'))
-        # Still held while NEPI re-engages: no new press, so assist stays on
-        engage(self.link, self.clock, surge = 0.2, seq = 10)
-        self.link.merge_inputs(pilot(rb = 1))
-        self.assertEqual(self.state(), (True, 'nepi_on'))
-        # Release, press again: off
         self.link.merge_inputs(pilot(rb = 0))
-        self.link.merge_inputs(pilot(rb = 1))
-        self.assertEqual(self.state(), (False, 'pilot_button'))
+        for i in range(3):
+            self.link.merge_inputs(pilot(rb = 1))
+        self.assertEqual(self.state(), (True, 'pilot_button'))
 
-    def test_button_does_not_turn_assist_on(self):
-        self.link.merge_inputs(pilot(rb = 1))
-        self.link.merge_inputs(pilot(rb = 0))
-        self.link.merge_inputs(pilot(rb = 1))
-        self.assertEqual(self.state(), (False, 'start'))
-
-    def test_after_timeout_needs_a_fresh_edge(self):
+    def test_active_false_ends_nepi_control_and_rb_turns_it_back_on(self):
         seq = engage(self.link, self.clock, surge = 0.2)
+        self.link.handle_demand(demandBytes(seq, False), NEPI)
+        self.assertEqual(self.state(), (False, 'nepi_off'))
+        self.link.handle_demand(demandBytes(seq + 1, True, 0.2), NEPI)
+        self.link.merge_inputs(pilot())
+        self.assertEqual(self.state(), (False, 'nepi_off'))
+        self.link.merge_inputs(pilot(rb = 1))
+        self.assertEqual(self.state(), (True, 'pilot_button'))
+
+    def test_after_timeout_needs_rb(self):
+        engage(self.link, self.clock, surge = 0.2)
         self.clock.advance(2.5)
         self.link.merge_inputs(pilot())
         self.assertEqual(self.state(), (False, 'timeout'))
-        # NEPI comes back still sending active true (accepted after the 1 s restart window)
+        # NEPI comes back (seq 0 is accepted after the 1 s restart window)
         self.link.handle_demand(demandBytes(0, True, 0.2), NEPI)
         self.assertEqual(self.link.build_status()['demand_seq'], 0)
+        self.link.merge_inputs(pilot())
         self.assertEqual(self.state(), (False, 'timeout'))
-        engage(self.link, self.clock, surge = 0.2, seq = 1)
-        self.assertEqual(self.state(), (True, 'nepi_on'))
+        self.link.merge_inputs(pilot(rb = 1))
+        self.assertEqual(self.state(), (True, 'pilot_button'))
 
     def test_slow_tracks_lb_like_the_teensy(self):
         self.assertFalse(self.link.build_status()['slow'])
@@ -415,6 +481,10 @@ class TestDemandValidation(unittest.TestCase):
     def test_infinity(self):
         self.assertDropped(demandBytes(self.seq, True, yaw = float('inf')))
         self.assertDropped(demandBytes(self.seq, True, 0.1, t = float('-inf')))
+
+    def test_bad_heave(self):
+        for bad in [1.5, -1.01, None, True, '0.1', float('nan')]:
+            self.assertDropped(demandBytes(self.seq, True, 0.1, heave = bad))
 
     def test_out_of_range(self):
         self.assertDropped(demandBytes(self.seq, True, surge = 1.01))
@@ -531,7 +601,7 @@ class TestStatus(unittest.TestCase):
         self.assertEqual((status['demand_seq'], status['demand_age_ms'], status['tn_age_ms']), (-1, -1, -1))
         self.assertIsNone(status['tn'])
         self.assertEqual(status['assist_reason'], 'start')
-        for key in ['assist', 'pilot_surge', 'pilot_sway', 'pilot_yaw', 'pilot_depth', 'slow']:
+        for key in ['assist', 'nepi_ready', 'pilot_surge', 'pilot_sway', 'pilot_yaw', 'pilot_depth', 'slow']:
             self.assertIsInstance(status[key], bool)
 
     def test_seq_advances_per_datagram(self):
@@ -557,6 +627,7 @@ class TestStatus(unittest.TestCase):
         link.assist_reason = 'pilot_button'
         link.out_lx = -32768
         link.out_ly = -32768
+        link.out_ry = -32768
         link.out_lt = 1023
         link.out_rt = 1023
         datagram = link.nextStatusDatagram()
@@ -564,9 +635,9 @@ class TestStatus(unittest.TestCase):
 
     def test_out_values_clamped_to_contract(self):
         link, clock, logs = makeLink()
-        link.merge_inputs(pilot(lt = 1023, ly = 40000))
+        link.merge_inputs(pilot(lt = 1023, ly = 40000, ry = -40000))
         status = link.build_status()
-        self.assertEqual((status['out_lt'], status['out_ly']), (255, 32767))
+        self.assertEqual((status['out_lt'], status['out_ly'], status['out_ry']), (255, 32767, -32768))
 
 
 class TestLinkOff(unittest.TestCase):
@@ -601,10 +672,16 @@ class TestLinkOff(unittest.TestCase):
         self.assertIsNone(nepi_link.validate_config(None)[0])
         for bad in [dict(NEPI_LAN_IP = 'nepi.local'), dict(NEPI_LAN_IP = NEPI, NEPI_MAX_SURGE = 1.5),
                     dict(NEPI_LAN_IP = NEPI, NEPI_YAW_SIGN = 0), dict(NEPI_LAN_IP = NEPI, NEPI_ASSIST_BUTTON = 'BTN_TL'),
+                    dict(NEPI_LAN_IP = NEPI, NEPI_MAX_HEAVE = -0.1), dict(NEPI_LAN_IP = NEPI, NEPI_HEAVE_SIGN = 2),
                     dict(NEPI_LAN_IP = NEPI, NEPI_ASSIST_BUTTON = ['BTN_TR']),
                     dict(NEPI_LAN_IP = NEPI, NEPI_TRIGGER_DEADZONE = 300),
                     dict(NEPI_LAN_IP = NEPI, NEPI_DEMAND_UDP_PORT = 70000),
-                    dict(NEPI_LAN_IP = NEPI, NEPI_MAX_YAW = True)]:
+                    dict(NEPI_LAN_IP = NEPI, NEPI_MAX_YAW = True),
+                    dict(NEPI_LAN_IP = NEPI, NEPI_TAKEOVER_FRACTION = 0),
+                    dict(NEPI_LAN_IP = NEPI, NEPI_TAKEOVER_FRACTION = 1.5),
+                    dict(NEPI_LAN_IP = NEPI, NEPI_TAKEOVER_FRACTION = True),
+                    # 0.09 of 32767 is 2949, inside the Teensy's 3000 stick dead zone
+                    dict(NEPI_LAN_IP = NEPI, NEPI_TAKEOVER_FRACTION = 0.09)]:
             self.assertIsNone(nepi_link.validate_config(bad)[0], bad)
 
 
@@ -634,8 +711,11 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(settings['NEPI_LAN_IP'], '192.168.68.23')
         self.assertEqual((settings['NEPI_TRIGGER_DEADZONE'], settings['NEPI_TRIGGER_MAX']), (40, 1023))
         self.assertEqual(settings['assist_slot'], nepi_link.RB_SLOT)
+        self.assertEqual(settings['NEPI_SURGE_SIGN'], -1) # Measured on the bench 2026-10-22: LY up reads negative
+        self.assertEqual((settings['takeover_stick'], settings['takeover_trigger']), (8192, 256))
         for key in ['NEPI_STATUS_UDP_PORT', 'NEPI_DEMAND_UDP_PORT', 'NEPI_ASSIST_BUTTON', 'NEPI_MAX_SURGE',
-                    'NEPI_MAX_SWAY', 'NEPI_MAX_YAW', 'NEPI_SURGE_SIGN', 'NEPI_SWAY_SIGN', 'NEPI_YAW_SIGN']:
+                    'NEPI_MAX_SWAY', 'NEPI_MAX_HEAVE', 'NEPI_MAX_YAW', 'NEPI_SWAY_SIGN', 'NEPI_HEAVE_SIGN',
+                    'NEPI_YAW_SIGN', 'NEPI_TAKEOVER_FRACTION']:
             self.assertEqual(settings[key], nepi_link.DEFAULT_CONFIG[key], key)
 
     def test_builtin_parser_matches_pyyaml(self):
@@ -669,7 +749,7 @@ class TestErrorFallback(unittest.TestCase):
     def test_exception_inside_merge_returns_inputs_unchanged(self):
         link, clock, logs = makeLink()
         engage(link, clock, surge = 0.2)
-        def broken(pilot_inputs):
+        def broken(*args):
             raise RuntimeError('forced')
         link.updatePilotLocked = broken
         inputs = pilot(ly = 50, rb = 1)
@@ -709,10 +789,10 @@ class TestFakeNepi(unittest.TestCase):
 
     def test_fake_demand_is_accepted(self):
         link, clock, logs = makeLink()
-        datagram = json.dumps(fake_nepi.make_demand(0, False, 0.1, -0.1, 0.05)).encode('utf-8')
+        datagram = json.dumps(fake_nepi.make_demand(0, False, 0.1, -0.1, 0.05, heave = 0.15)).encode('utf-8')
         [demand, msg] = nepi_link.parse_demand(datagram, NEPI, NEPI)
         self.assertIsNotNone(demand, msg)
-        self.assertEqual((demand['surge'], demand['sway'], demand['yaw']), (0.1, -0.1, 0.05))
+        self.assertEqual((demand['surge'], demand['sway'], demand['heave'], demand['yaw']), (0.1, -0.1, 0.15, 0.05))
 
 
 class TestLoopback(unittest.TestCase):
@@ -739,13 +819,16 @@ class TestLoopback(unittest.TestCase):
                       NEPI_DEMAND_UDP_PORT = self.demand_port)
         [on, msg] = self.link.start(config, 'test')
         self.assertTrue(on, msg)
-        # active false first, until the bridge has one (its thread may still be binding)
+        # NEPI ready, until the bridge has a demand (its thread may still be binding)
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline and self.link.build_status()['demand_seq'] < 0:
-            self.sender.send(False)
+            self.sender.send(True, 0.2, 0.0, 0.0)
             time.sleep(0.1)
         self.assertGreaterEqual(self.link.build_status()['demand_seq'], 0)
-        merged = None
+        self.assertEqual(self.link.topside_tag(), ',NEPI:OFF')
+        # The pilot presses RB
+        merged = self.link.merge_inputs(pilot(rb = 1))
+        self.link.merge_inputs(pilot())
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             self.sender.send(True, 0.2, 0.0, 0.0)
@@ -764,10 +847,11 @@ class TestLoopback(unittest.TestCase):
         self.assertTrue(len(statuses) >= 2)
         newest = statuses[-1]
         self.assertTrue(newest['assist'])
-        self.assertEqual((newest['assist_reason'], newest['out_ly'], newest['demand_bad']), ('nepi_on', 8713, 0))
-        # NEPI stops: after 250 ms the pilot's inputs pass through and the tag reads WAIT
+        self.assertTrue(newest['nepi_ready'])
+        self.assertEqual((newest['assist_reason'], newest['out_ly'], newest['demand_bad']), ('pilot_button', 8713, 0))
+        # NEPI stops: after 250 ms every movement input is neutral and the tag reads WAIT
         time.sleep(0.5)
-        self.assertEqual(self.link.merge_inputs([0] * 18), tuple([0] * 18))
+        self.assertEqual(self.link.merge_inputs(pilot(ly = 1500))[nepi_link.LY_SLOT], 0)
         self.assertEqual(self.link.topside_tag(), ',NEPI:WAIT')
         # stop() closes the demand port
         self.link.stop()

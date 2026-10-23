@@ -144,9 +144,24 @@ The Teensy day results. "Passed" was seen on the bench. "Computed" comes from th
 **Still open.**
 - The physical push direction for LY up, LX right, LT and RY up (P7).
 - The heading-hold sign, which needs the IMU (P7).
-- The depth and IMU checks of P5 and P7, which need the Bar02 and the BNO085 (D2).
+- The depth and IMU checks of P5 and P7, which need the Bar02 and the BNO085 (D2). The Bar02 half passed on 2026-10-23 (below); the IMU half and the in-water depth hold are still open.
 - All eight ESCs and thrusters at once: only one ESC and one T200 were on the bench (P6).
 - Where the startup tones on a USB unplug come from (P6).
+
+## Bench Log, 2026-10-23
+
+**Passed.**
+- Bar02 wired to the Teensy: red to `3V`, white SDA to 18, green SCL to 19, black to GND (P5).
+- The bench copy with only `bar02_setup()` and `read_bar02()` turned back on (BNO085 lines and `delay(5)` unchanged) flashed with `-p usb1/1-1` and sent `$TNCTL`. That proves the Bar02 initialized, since `bar02_setup()` blocks until it answers (P5).
+- `depth_m` (value 9) read 0.03 to 0.04 m in air and changed between lines; the sensor-less copy printed exactly `0.00`. 0.03 m is about 1016 mbar, which confirms the sketch's `MS5837_02BA` model (P5).
+- With the sticks centred, depth hold moved values 1 to 4 between -9 and 2, inside the Basic ESC deadband of ±25 (P7).
+- Depth reached NEPI: `/nepi/device1/mate_rov_link_robot/npx/navpose/depth` (`NavPoseDepth`) read `depth_m` 0.04 with a current timestamp, through the Pi's `nepi_link` and the `rbx_mate_rov_link` driver (P9). The RUI robot NavPose panel showed it, and it went up with the sensor face put in water (P9).
+
+**Found.**
+- After a Teensy flash, restart the laptop script before the Pi script. `topside/modes/main.py:20` calls `accept()` once, so a Pi that reconnects is never served. The stale connection shows as `CLOSE-WAIT` in `ss -tnp | grep 10110`.
+- While the link is down, the driver's depth topic keeps repeating the last reading with its old timestamp. Check `timestamp` before trusting `depth_m`.
+- `depth_m_per_sec` is always 0: the driver does not pass the Teensy's `depth_m_s` on.
+- `-p /dev/ttyACM0` compiles but does not upload once a sketch is running; use the `teensy`-protocol port (Main info, P5).
 
 ## Plan Steps
 
@@ -464,6 +479,7 @@ The decoder must:
 - **Board and flashing.** The team's command is `arduino-cli compile -u -b teensy:avr:teensy41 -p /dev/ttyACM0 <sketch>.ino` (`mcu/modes/tuning/upload.sh:1`, `mcu/modes/new_ctl/upload.sh:1`). It fails on a fresh board.
   - A new Teensy 4.1 runs PJRC's factory blink sketch as USB RawHID. `lsusb` shows `16c0:0486 Teensyduino RawHID`, and `/dev/ttyACM0` does not exist until a sketch with USB serial is flashed (bench, 2026-10-21).
   - `arduino-cli board list` shows the board as port `usb1/1-1`, protocol `teensy`, Teensy 4.1. The port name depends on the USB socket, so always take it from that list.
+  - Always use the row whose protocol is `teensy`, also after the first flash. Once a sketch is running, the list shows two rows for the board: `/dev/ttyACM0` (protocol `serial`) and `usb1/1-1` (protocol `teensy`). With `-p /dev/ttyACM0` the sketch compiles, but the output ends with "Teensy should be selected from "teensy ports" rather than "Serial ports"" and does not appear to upload (bench, 2026-10-23).
   - What worked every time on the bench: `arduino-cli compile -u -b teensy:avr:teensy41 -p usb1/1-1 .`, run inside the sketch folder. The program button was not needed. After the first flash, `/dev/ttyACM0` appears.
   - Flashing from the control Pi worked (D7, resolved for the bench).
 - **Libraries.**
@@ -523,7 +539,7 @@ ls -l /dev/ttyACM0                      # appears after the first flash
 python3 -m serial.tools.miniterm /dev/ttyACM0 115200     # expect $TNCTL lines; Ctrl+] quits
 ```
 
-`<sketch>` is `new_ctl` or `tuning`, or Victoria's sketch. Replace `usb1/1-1` with the port `arduino-cli board list` shows. The unmodified sketch with no sensors prints `Failed to initialize bar02` once a second and never sends `$TNCTL` (`new_ctl.ino:227-231`).
+`<sketch>` is `new_ctl` or `tuning`, or Victoria's sketch. Replace `usb1/1-1` with the port `arduino-cli board list` shows in the row whose protocol is `teensy`, never the `/dev/ttyACM0` serial row (Main info). The unmodified sketch with no sensors prints `Failed to initialize bar02` once a second and never sends `$TNCTL` (`new_ctl.ino:227-231`).
 
 4. Quit miniterm. Quitting it does not stop the sketch. Start the laptop script (P2), then `python3 rpi/modes/main.py` (P1).
 5. The Pi prints the serial port list (`rpi/modes/main.py:26-27`), then every Teensy line (`:106`).
@@ -538,7 +554,7 @@ python3 -m serial.tools.miniterm /dev/ttyACM0 115200     # expect $TNCTL lines; 
 - `ERRTRM` lines with the repo's `tuning.ino` and a repo Pi script confirm the frame-size mismatch (finding 1). Do not go on to P6 with that pair.
 - Flashing needs the port free. Quit miniterm (Ctrl+]) and stop the Pi script first, before every upload. Quitting miniterm does not stop the sketch.
 - Never open the Teensy's port at 134 baud. That reboots it into the bootloader (`Docs/tbd/pjrc_teensy_4_1.md:65`).
-- `/dev/ttyACM0` exists only while a sketch with USB serial is running (`Docs/tbd/pjrc_teensy_4_1.md:138`). A brand-new Teensy 4.1 runs the factory blink sketch as RawHID (`lsusb`: `16c0:0486 Teensyduino RawHID`), so `upload.sh`'s `-p /dev/ttyACM0` fails on it. Use the port from `arduino-cli board list`. The program button was not needed (2026-10-21).
+- `/dev/ttyACM0` exists only while a sketch with USB serial is running (`Docs/tbd/pjrc_teensy_4_1.md:138`). A brand-new Teensy 4.1 runs the factory blink sketch as RawHID (`lsusb`: `16c0:0486 Teensyduino RawHID`), so `upload.sh`'s `-p /dev/ttyACM0` fails on it. Use the `teensy`-protocol port from `arduino-cli board list`. Once a sketch is running, `-p /dev/ttyACM0` still does not upload: it ends with "Teensy should be selected from "teensy ports"" (2026-10-23). The program button was not needed (2026-10-21).
 - The `usb1/1-1` port name depends on which USB socket the cable is in. Read it from `arduino-cli board list` after moving the cable.
 - The repo's `MS5837/` folder does not compile (Main info). If it was copied into `~/Arduino/libraries`, run `rm -rf ~/Arduino/libraries/MS5837` before installing the library-manager version, as the bench did.
 - `tuning.ino` prints a line on every loop, so the Pi terminal scrolls fast. That is normal.

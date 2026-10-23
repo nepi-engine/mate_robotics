@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.join(HERE, '..', '..', 'Drivers', 'rbx_drivers'))
 
 def stubModules():
     names = ['nepi_sdk', 'nepi_sdk.nepi_sdk', 'nepi_sdk.nepi_nav', 'nepi_sdk.nepi_utils', 'nepi_sdk.nepi_drvs',
-             'nepi_sdk.nepi_system', 'nepi_api', 'nepi_api.device_if_rbx', 'nepi_api.messages_if',
+             'nepi_sdk.nepi_system', 'nepi_sdk.nepi_controls', 'nepi_api', 'nepi_api.device_if_rbx', 'nepi_api.messages_if',
              'std_msgs', 'std_msgs.msg', 'nepi_interfaces', 'nepi_interfaces.msg']
     for name in names:
         sys.modules[name] = types.ModuleType(name)
@@ -51,6 +51,7 @@ def stubModules():
     sys.modules['nepi_api.device_if_rbx'].RBXRobotIF = None
     sys.modules['nepi_api.messages_if'].MsgIF = None
     sys.modules['std_msgs.msg'].String = None
+    sys.modules['std_msgs.msg'].Empty = None
     sys.modules['nepi_interfaces.msg'].AxisControls = None
 
 stubModules()
@@ -103,9 +104,10 @@ def waitFor(predicate, timeout_sec = 1.0):
         time.sleep(0.002)
     return predicate()
 
-def pilot(rb = 0):
+def pilot(rb = 0, ly = 0):
     inputs = [0] * 18
     inputs[nepi_link.RB_SLOT] = rb
+    inputs[nepi_link.LY_SLOT] = ly
     return inputs
 
 def statusBytes(**changes):
@@ -180,7 +182,7 @@ class Bench(object):
         if not waitFor(lambda: self.link.status_seq == seq or self.link.status_bad > bad):
             raise AssertionError('status ' + str(seq) + ' never reached the link')
 
-    def step(self, command = None, rb = 0, status = True):
+    def step(self, command = None, rb = 0, status = True, ly = 0):
         if command is not None:
             self.link.set_teleop_velocity(*command)
         demand = None
@@ -189,7 +191,7 @@ class Bench(object):
             [datagram, sender] = self.demand_rx.recvfrom(65536)
             demand = json.loads(datagram.decode('utf-8'))
             self.pi.handle_demand(datagram, sender[0])
-        self.merged = self.pi.merge_inputs(pilot(rb = rb))
+        self.merged = self.pi.merge_inputs(pilot(rb = rb, ly = ly))
         if status:
             self.sendStatus(self.pi.nextStatusDatagram())
         self.clock.advance(0.1)
@@ -212,13 +214,17 @@ class Bench(object):
         finally:
             self.demand_rx.settimeout(1.0)
 
+    def handOver(self):
+        # The pilot presses and releases RB; NEPI must already be ready
+        self.step(rb = 1)
+        if self.piState() != (True, 'pilot_button'):
+            raise AssertionError('RB did not hand over: ' + str(self.piState()))
+
     def engage(self, command):
-        # Link up, idle active false, then the command's first active true
+        # Link up and NEPI ready, RB, then the command's first demand
         self.steps(3)
-        demand = self.step(command)
-        if not demand['active'] or self.piState() != (True, 'nepi_on'):
-            raise AssertionError('did not engage: ' + str(self.piState()))
-        return demand
+        self.handOver()
+        return self.step(command)
 
 
 class BenchCase(unittest.TestCase):
@@ -232,39 +238,59 @@ class BenchCase(unittest.TestCase):
 
 class TestIdle(BenchCase):
 
-    def test_idle_sends_active_false_every_tick_and_assist_stays_off(self):
+    def test_idle_sends_active_true_every_tick_and_the_pilot_keeps_the_rov(self):
         self.assertEqual(MateRovLink.DEMAND_PERIOD_SEC, 0.1)
         b = self.bench
         self.assertIsNone(b.step()) # No status yet: the link is down
+        self.assertEqual(b.pi.topside_tag(), ',NEPI:NOTREADY')
         demands = b.steps(10)
         for demand in demands:
             self.assertIsNotNone(demand)
-            self.assertFalse(demand['active'])
-            self.assertEqual([demand[name] for name in ['surge', 'sway', 'yaw', 'pitch', 'roll']], [0.0] * 5)
+            self.assertTrue(demand['active'])
+            self.assertEqual([demand[name] for name in ['surge', 'sway', 'heave', 'yaw', 'pitch', 'roll']], [0.0] * 6)
         # One demand per 0.1 s tick, each accepted in order
         self.assertEqual([d['seq'] for d in demands], list(range(demands[0]['seq'], demands[0]['seq'] + 10)))
         status = b.pi.build_status()
         self.assertEqual((status['demand_seq'], status['demand_bad']), (demands[-1]['seq'], 0))
+        # Ready, but only RB hands the ROV over
         self.assertEqual(b.piState(), (False, 'start'))
+        self.assertEqual(b.pi.topside_tag(), ',NEPI:OFF')
         health = b.link.get_health()
-        self.assertEqual((health['link_up'], health['latched'], health['assist']), (True, False, False))
+        self.assertEqual((health['link_up'], health['nepi_control'], health['assist']), (True, False, False))
         self.assertTrue(b.link.is_link_up())
+        self.assertFalse(b.link.is_nepi_control())
         # Logged once, not per message
         self.assertEqual(len(b.link_logs), 1, b.link_logs)
 
 
-class TestEngage(BenchCase):
+class TestHandover(BenchCase):
 
-    def test_fresh_command_turns_assist_on_and_merges_surge(self):
+    def test_rb_hands_over_and_the_command_merges(self):
         b = self.bench
         demand = b.engage((0.1, 0.0, 0.0, 0.0))
-        self.assertEqual((demand['surge'], demand['sway'], demand['yaw']), (0.1, 0.0, 0.0))
+        self.assertEqual((demand['active'], demand['surge'], demand['sway'], demand['yaw']), (True, 0.1, 0.0, 0.0))
         self.assertEqual(b.pi.settings['NEPI_SURGE_SIGN'], 1)
         self.assertEqual(b.merged[nepi_link.LY_SLOT], SURGE_0_1)
-        b.step((0.1, 0.0, 0.0, 0.0))
+        self.assertEqual(b.pi.topside_tag(), ',NEPI:ON')
         health = b.link.get_health()
-        self.assertEqual((health['assist'], health['assist_reason'], health['latched']), (True, 'nepi_on', False))
+        self.assertEqual((health['nepi_control'], health['assist'], health['assist_reason']), (True, True, 'pilot_button'))
+        self.assertTrue(b.link.is_nepi_control())
         self.assertGreaterEqual(health['demand_age_ms'], 0)
+        self.assertTrue(any(line.startswith('NEPI control on') for line in b.link_logs), b.link_logs)
+
+    def test_commands_before_the_handover_are_dropped(self):
+        b = self.bench
+        command = (0.1, 0.0, 0.0, 0.0)
+        demands = b.steps(4, command)
+        self.assertEqual([d['surge'] for d in demands[1:]], [0.0] * 3)
+        self.assertIsNone(b.link.cmd)
+        self.assertEqual(b.merged[nepi_link.LY_SLOT], 0)
+        # The handover starts neutral; only a command after it moves the ROV
+        b.handOver()
+        self.assertEqual(b.merged[nepi_link.LY_SLOT], 0)
+        self.assertEqual(b.step()['surge'], 0.0)
+        self.assertEqual(b.step(command)['surge'], 0.1)
+        self.assertEqual(b.merged[nepi_link.LY_SLOT], SURGE_0_1)
 
     def test_ros_axes_map_to_protocol_axes(self):
         b = self.bench
@@ -275,12 +301,17 @@ class TestEngage(BenchCase):
         self.assertEqual(b.merged[nepi_link.RT_SLOT], nepi_link.trigger_value(0.05, 10, 255))
         self.assertGreater(b.merged[nepi_link.RT_SLOT], 0)
         self.assertEqual(b.merged[nepi_link.LX_SLOT], nepi_link.stick_value(-0.1))
-        # linear.z is ignored: the Teensy holds depth
-        demand = b.step((0.0, 0.0, 0.7, 0.0))
-        self.assertEqual((demand['active'], demand['surge'], demand['sway'], demand['yaw']), (True, 0.0, 0.0, 0.0))
+        # Up (ROS linear.z positive) is negative heave, which drives RY
+        demand = b.step((0.0, 0.0, 0.1, 0.0))
+        self.assertEqual((demand['active'], demand['surge'], demand['sway'], demand['heave'], demand['yaw']),
+                         (True, 0.0, 0.0, -0.1, 0.0))
+        self.assertEqual(b.merged[nepi_link.RY_SLOT], nepi_link.stick_value(-0.1))
+        # Heave back to 0 leaves RY at 0, so the Teensy holds the new depth
+        b.step((0.1, 0.0, 0.0, 0.0))
+        self.assertEqual((b.merged[nepi_link.LY_SLOT], b.merged[nepi_link.RY_SLOT]), (SURGE_0_1, 0))
         # Each axis is clamped to -1 to 1; the Pi applies its own caps
-        demand = b.step((2.0, -3.0, 0.0, 5.0))
-        self.assertEqual((demand['surge'], demand['sway'], demand['yaw']), (1.0, 1.0, -1.0))
+        demand = b.step((2.0, -3.0, 4.0, 5.0))
+        self.assertEqual((demand['surge'], demand['sway'], demand['heave'], demand['yaw']), (1.0, 1.0, -1.0, -1.0))
         self.assertEqual(b.pi.build_status()['demand_bad'], 0)
 
     def test_bad_command_values_are_not_stored(self):
@@ -289,84 +320,104 @@ class TestEngage(BenchCase):
         for bad in [float('nan'), float('inf'), True, '0.1', None]:
             [success, msg] = b.link.set_teleop_velocity(bad, 0.0, 0.0, 0.0)
             self.assertFalse(success)
-        self.assertEqual(b.link.cmd, [0.1, 0.0, 0.0])
+            [success, msg] = b.link.set_teleop_velocity(0.0, 0.0, bad, 0.0)
+            self.assertFalse(success)
+        self.assertEqual(b.link.cmd, [0.1, 0.0, 0.0, 0.0])
 
 
-class TestLatch(BenchCase):
+class TestNepiControl(BenchCase):
 
-    def test_pilot_button_latches_until_commands_pause_for_one_second(self):
+    def test_rb_again_hands_the_rov_back(self):
         b = self.bench
         command = (0.1, 0.0, 0.0, 0.0)
         b.engage(command)
-        b.step(command)
         b.step(command, rb = 1)
         self.assertEqual(b.piState(), (False, 'pilot_button'))
-        # Commands keep coming, but the link holds active false
-        demands = b.steps(5, command)
-        self.assertEqual([d['active'] for d in demands], [False] * 5)
-        self.assertTrue(b.link.get_health()['latched'])
-        self.assertEqual(b.piState(), (False, 'pilot_button'))
+        self.assertFalse(b.link.is_nepi_control())
+        # Commands still arriving are dropped, and NEPI stays ready
+        demands = b.steps(3, command)
+        self.assertEqual([(d['active'], d['surge']) for d in demands], [(True, 0.0)] * 3)
         self.assertEqual(b.merged[nepi_link.LY_SLOT], 0)
-        # A 0.5 s pause is not enough
-        b.steps(5)
-        self.assertFalse(b.step(command)['active'])
-        self.assertTrue(b.link.get_health()['latched'])
-        # A 1 s pause clears the latch, and the next command engages again
-        b.steps(9)
-        self.assertTrue(b.link.get_health()['latched'])
-        b.steps(2)
-        self.assertFalse(b.link.get_health()['latched'])
-        self.assertTrue(b.step(command)['active'])
-        self.assertEqual(b.piState(), (True, 'nepi_on'))
+        self.assertEqual(b.pi.topside_tag(), ',NEPI:OFF')
+        self.assertTrue(any(line.startswith('NEPI control off (pilot_button)') for line in b.link_logs), b.link_logs)
+        # RB once more hands it over again
+        b.handOver()
+        self.assertEqual(b.step(command)['surge'], 0.1)
         self.assertEqual(b.merged[nepi_link.LY_SLOT], SURGE_0_1)
-        latch_logs = [line for line in b.link_logs if line.startswith('Latch')]
-        self.assertEqual(len(latch_logs), 2, b.link_logs)
-        self.assertIn('pilot_button', latch_logs[0])
 
-    def test_stale_command_sends_active_false_and_does_not_latch(self):
+    def test_a_stick_past_the_takeover_point_hands_the_rov_back(self):
         b = self.bench
         command = (0.1, 0.0, 0.0, 0.0)
         b.engage(command)
-        # Still fresh at 0.1 s and 0.2 s, stale after 0.25 s
-        self.assertEqual([d['active'] for d in b.steps(3)], [True, True, False])
-        self.assertEqual(b.piState(), (False, 'nepi_off'))
-        self.assertFalse(b.link.get_health()['latched'])
-        # Within 1 s, a fresh command engages again at once
-        self.assertTrue(b.step(command)['active'])
-        self.assertEqual(b.piState(), (True, 'nepi_on'))
+        b.step(command, ly = 20000)
+        self.assertEqual(b.piState(), (False, 'pilot_stick'))
+        self.assertEqual(b.merged[nepi_link.LY_SLOT], 20000)
+        self.assertEqual(b.link.get_health()['assist_reason'], 'pilot_stick')
+        self.assertFalse(b.link.is_nepi_control())
+        self.assertEqual(b.step(command)['surge'], 0.0)
 
-    def test_restarted_pi_script_latches_after_half_a_second(self):
+    def test_stale_command_goes_neutral_and_nepi_keeps_the_rov(self):
+        self.assertEqual(MateRovLink.TELEOP_CMD_TIMEOUT_SEC, 0.5)
+        b = self.bench
+        b.engage((0.1, 0.0, 0.0, 0.0))
+        # Fresh for 0.4 s after the command, neutral by 0.7 s
+        self.assertEqual([d['surge'] for d in b.steps(4)], [0.1] * 4)
+        b.steps(2)
+        demand = b.step()
+        self.assertEqual((demand['active'], demand['surge']), (True, 0.0))
+        self.assertEqual(b.merged[nepi_link.LY_SLOT], 0)
+        self.assertEqual(b.piState(), (True, 'pilot_button'))
+        self.assertEqual(b.pi.topside_tag(), ',NEPI:ON')
+
+    def test_stop_goes_neutral_and_nepi_keeps_the_rov(self):
+        b = self.bench
+        b.engage((0.1, 0.0, 0.0, 0.0))
+        [success, msg] = b.link.go_stop()
+        self.assertTrue(success, msg)
+        self.assertIsNone(b.link.cmd)
+        demand = b.step()
+        self.assertEqual((demand['active'], demand['surge']), (True, 0.0))
+        self.assertEqual(b.merged[nepi_link.LY_SLOT], 0)
+        self.assertEqual(b.piState(), (True, 'pilot_button'))
+
+    def test_release_to_pilot_sends_one_active_false(self):
+        b = self.bench
+        command = (0.1, 0.0, 0.0, 0.0)
+        b.engage(command)
+        [success, msg] = b.link.release_to_pilot()
+        self.assertTrue(success, msg)
+        demands = b.steps(3, command)
+        self.assertEqual([d['active'] for d in demands], [False, True, True])
+        self.assertEqual([d['surge'] for d in demands], [0.0] * 3)
+        self.assertEqual(b.piState(), (False, 'nepi_off'))
+        self.assertFalse(b.link.is_nepi_control())
+        self.assertEqual(b.pi.topside_tag(), ',NEPI:OFF')
+        # The pilot can hand it over again
+        b.handOver()
+        self.assertTrue(b.link.is_nepi_control())
+
+    def test_release_while_the_link_is_down_fails(self):
+        b = self.bench
+        [success, msg] = b.link.release_to_pilot()
+        self.assertFalse(success)
+        self.assertIn('Link down', msg)
+
+    def test_restarted_pi_script_starts_with_the_pilot(self):
         b = self.bench
         command = (0.1, 0.0, 0.0, 0.0)
         b.engage(command)
         # The Pi script restarts: over 1 s of silence while commands keep coming
         b.steps(12, command, status = False)
         self.assertFalse(b.link.is_link_up())
+        self.assertFalse(b.link.is_nepi_control())
         b.restartPi()
         self.assertIsNone(b.step(command)) # Its first status brings the link up
-        # Its first-ever demand is active true, which it ignores
-        actives = [d['active'] for d in b.steps(8, command)]
-        self.assertEqual(actives[:5], [True] * 5)
-        self.assertEqual(actives[6:], [False] * 2)
-        self.assertTrue(b.link.get_health()['latched'])
+        demands = b.steps(3, command)
+        self.assertEqual([(d['active'], d['surge']) for d in demands], [(True, 0.0)] * 3)
         self.assertEqual(b.piState(), (False, 'start'))
-        # Pause 1 s, then the Pi sees a false-to-true edge
-        b.steps(11)
-        self.assertTrue(b.step(command)['active'])
-        self.assertEqual(b.piState(), (True, 'nepi_on'))
-
-    def test_stop_clears_the_command_and_latches(self):
-        b = self.bench
-        command = (0.1, 0.0, 0.0, 0.0)
-        b.engage(command)
-        [success, msg] = b.link.go_stop()
-        self.assertTrue(success, msg)
-        self.assertIsNone(b.link.cmd)
-        self.assertTrue(b.link.get_health()['latched'])
-        demands = [b.step()] + b.steps(5, command)
-        self.assertEqual([d['active'] for d in demands], [False] * 6)
-        self.assertEqual(b.piState(), (False, 'nepi_off'))
-        self.assertTrue(b.link.get_health()['latched'])
+        self.assertFalse(b.link.is_nepi_control())
+        b.handOver()
+        self.assertEqual(b.step(command)['surge'], 0.1)
 
 
 class TestLinkDown(BenchCase):
@@ -383,6 +434,7 @@ class TestLinkDown(BenchCase):
         b.steps(2, command, status = False)
         # Over 0.5 s: down, not ready, and nothing sent
         self.assertFalse(b.link.is_link_up())
+        self.assertFalse(b.link.is_nepi_control())
         self.assertFalse(b.link.get_health()['link_up'])
         [sent, msg] = b.link.send_demand()
         self.assertFalse(sent, msg)
@@ -431,6 +483,37 @@ class TestSeq(BenchCase):
         self.assertEqual(link.seq, int(WALL_EPOCH * MateRovLink.SEQ_PER_SEC) & MateRovLink.SEQ_MAX)
         link = MateRovLink(ROV, wall_clock = lambda: 1.0e12)
         self.assertTrue(0 <= link.seq <= MateRovLink.SEQ_MAX)
+
+
+class TestNavPose(unittest.TestCase):
+    # getNavPoseCb on a stand-in self, since the node class is never built
+
+    def setUp(self):
+        rbx_mate_rov_link_node.nepi_utils.get_time = lambda: 1000.0
+        self.tn = None
+        self.tn_age_ms = -1
+        link = types.SimpleNamespace(get_tn = lambda: [self.tn, self.tn_age_ms])
+        self.node = types.SimpleNamespace(link = link, TN_MAX_AGE_MS = rbx_mate_rov_link_node.MateRovLinkNode.TN_MAX_AGE_MS,
+                                          navpose_dict = dict(has_depth = False, has_orientation = False))
+
+    def navpose(self):
+        return rbx_mate_rov_link_node.MateRovLinkNode.getNavPoseCb(self.node)
+
+    def test_none_until_the_first_fresh_telemetry(self):
+        # None makes NPXDeviceIF wait instead of fixing has_depth False for good
+        self.assertIsNone(self.navpose())
+        self.tn = dict(depth_m = '0.03', yaw_deg = '0.00', pitch_deg = '0.00', roll_deg = '0.00')
+        self.tn_age_ms = self.node.TN_MAX_AGE_MS + 1
+        self.assertIsNone(self.navpose())
+        self.tn_age_ms = 100
+        navpose = self.navpose()
+        self.assertTrue(navpose['has_depth'])
+        self.assertEqual(navpose['depth_m'], 0.03)
+        self.assertAlmostEqual(navpose['time_depth'], 999.9)
+        self.assertTrue(navpose['has_orientation'])
+        # Stale after that: the last navpose, not None
+        self.tn_age_ms = self.node.TN_MAX_AGE_MS + 1
+        self.assertIs(self.navpose(), navpose)
 
 
 class TestStatusValidation(unittest.TestCase):
@@ -518,7 +601,7 @@ class TestLoopback(unittest.TestCase):
             time.sleep(0.08)
         return until is None or until()
 
-    def test_threads_engage_release_and_link_down(self):
+    def test_threads_hand_over_release_and_link_down(self):
         [success, msg] = self.link.start()
         self.assertTrue(success, msg)
         config = dict(NEPI_LAN_IP = ROV, NEPI_STATUS_UDP_PORT = self.status_port,
@@ -526,17 +609,19 @@ class TestLoopback(unittest.TestCase):
         [on, msg] = self.pi.start(config, 'test')
         self.assertTrue(on, msg)
         self.assertTrue(waitFor(self.link.is_link_up, 2.0))
-        # Idle: active false reaches the Pi, assist stays off
-        self.assertTrue(self.tick(2.0, until = lambda: self.pi.build_status()['demand_seq'] >= 0))
+        # Idle: NEPI is ready, and the pilot keeps the ROV
+        self.assertTrue(self.tick(2.0, until = lambda: self.pi.build_status()['nepi_ready']))
         self.tick(0.3)
         self.assertEqual(self.pi.build_status()['assist'], False)
-        # A command engages, and the link sees assist come on
+        # The pilot presses RB; the link sees NEPI control, and the command merges
+        self.pi.merge_inputs(pilot(rb = 1))
+        self.assertTrue(self.tick(1.0, until = self.link.is_nepi_control))
         self.assertTrue(self.tick(2.0, (0.1, 0.0, 0.0, 0.0), until = lambda: self.merged[nepi_link.LY_SLOT] == SURGE_0_1))
-        self.assertTrue(self.tick(1.0, (0.1, 0.0, 0.0, 0.0), until = lambda: self.link.get_health()['assist']))
-        self.assertEqual(self.link.get_health()['assist_reason'], 'nepi_on')
-        # Commands stop: active false, and the Pi reports nepi_off
+        self.assertEqual(self.link.get_health()['assist_reason'], 'pilot_button')
+        # NEPI hands it back: one active false, and the Pi reports nepi_off
+        self.assertTrue(self.link.release_to_pilot()[0])
         self.assertTrue(self.tick(1.0, until = lambda: self.link.get_health()['assist_reason'] == 'nepi_off'))
-        self.assertFalse(self.link.get_health()['latched'])
+        self.assertFalse(self.link.is_nepi_control())
         self.assertEqual(self.pi.build_status()['demand_bad'], 0)
         # The Pi stops: the link goes down within 0.5 s and sends nothing
         self.pi.stop()

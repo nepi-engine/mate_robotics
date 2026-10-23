@@ -9,7 +9,7 @@
 ##
 
 # Stands in for NEPI on the bench, so the control Pi's nepi_link.py can be
-# tested before rbx_rov_link and the hold process exist.
+# tested without the NEPI device and rbx_mate_rov_link.
 #
 # It speaks the NEPI side of Nepi_Connect/LINK_PROTOCOL.md: it receives the
 # Pi's status on UDP 5700 and sends demands to the Pi's UDP 5701. The Pi
@@ -18,16 +18,18 @@
 # (BENCH_SETUP_PLAN.md P9, "Bench install").
 #
 #   python3 fake_nepi.py --pi 192.168.68.22 watch
-#       One line per status: assist, the reason it last changed, the merged
-#       LY, LX, LT and RT the Pi handed the Teensy, dropped demands, and the
-#       Teensy's eight thruster values when present.
+#       One line per status: NEPI control (assist), the reason it last
+#       changed, whether the Pi counts NEPI as ready, the merged LY, LX, RY, LT
+#       and RT the Pi handed the Teensy, dropped demands, and the Teensy's
+#       eight thruster values when present.
 #   python3 fake_nepi.py --pi 192.168.68.22 hold --surge 0.05 --seconds 10
-#       Sends active false for 0.5 s, so the Pi sees the rising edge that turns
-#       assist on (BENCH_SETUP_PLAN.md D3 option c), then active true with the
-#       given surge, sway and yaw at 10 Hz, printing each status. If the Pi
-#       turns assist off (RB, or its 2 s timeout), it prints the reason and
-#       sends active false from then on. On finish or Ctrl+C it sends active
-#       false for 0.5 s.
+#       Sends active true with the given surge, sway, heave and yaw at 10 Hz, so the
+#       Pi counts NEPI as ready, and prints each status. The pilot's RB then
+#       hands the ROV to it (BENCH_SETUP_PLAN.md D3); RB again, a movement
+#       input past the takeover point, or the Pi's 2 s timeout hands it back,
+#       and RB can hand it over again while this keeps running. On finish or
+#       Ctrl+C it sends active false for 0.5 s, which ends NEPI control at
+#       once (nepi_off). Ctrl+\ quits with no active false, to test the timeout.
 #
 # Standard library only, Python 3.8 or newer. Bench use only; it never goes
 # on the robot or on NEPI.
@@ -42,25 +44,27 @@ import time
 
 
 DEMAND_PERIOD_SEC = 0.1 # 10 Hz, the Pi's serial write rate
-EDGE_SEC = 0.5 # Time spent sending active false before and after a hold
+RELEASE_SEC = 0.5 # Time spent sending active false after a hold
 MAX_DATAGRAM_BYTES = 1200
 
 
-def make_demand(seq, active, surge = 0.0, sway = 0.0, yaw = 0.0):
+def make_demand(seq, active, surge = 0.0, sway = 0.0, yaw = 0.0, heave = 0.0):
     """Build one demand message (LINK_PROTOCOL "Demand: NEPI to Pi").
 
     Args:
         seq (int): Sequence number, 0 to 4294967295.
-        active (bool): NEPI's hold wants these values used.
+        active (bool): NEPI is connected and ready to take the ROV.
         surge (float): -1 to 1, positive forward.
         sway (float): -1 to 1, positive right.
         yaw (float): -1 to 1, positive clockwise seen from above.
+        heave (float): -1 to 1, positive down.
 
     Returns:
         dict: The demand, with pitch and roll 0 as version 1 requires.
     """
     return {'v': 1, 'type': 'demand', 'seq': int(seq), 't': round(time.time(), 3), 'active': bool(active),
-            'surge': float(surge), 'sway': float(sway), 'yaw': float(yaw), 'pitch': 0.0, 'roll': 0.0}
+            'surge': float(surge), 'sway': float(sway), 'heave': float(heave), 'yaw': float(yaw),
+            'pitch': 0.0, 'roll': 0.0}
 
 
 class DemandSender(object):
@@ -74,7 +78,7 @@ class DemandSender(object):
         self.seq = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def send(self, active, surge = 0.0, sway = 0.0, yaw = 0.0):
+    def send(self, active, surge = 0.0, sway = 0.0, yaw = 0.0, heave = 0.0):
         """Send one demand.
 
         Args:
@@ -82,11 +86,13 @@ class DemandSender(object):
             surge (float): As in make_demand().
             sway (float): As in make_demand().
             yaw (float): As in make_demand().
+            heave (float): As in make_demand().
 
         Returns:
             list: [success (bool), msg (str)].
         """
-        datagram = json.dumps(make_demand(self.seq, active, surge, sway, yaw), separators = (',', ':')).encode('utf-8')
+        datagram = json.dumps(make_demand(self.seq, active, surge, sway, yaw, heave),
+                              separators = (',', ':')).encode('utf-8')
         self.seq = (self.seq + 1) & 0xFFFFFFFF
         try:
             self.sock.sendto(datagram, self.address)
@@ -236,8 +242,10 @@ class StatusReceiver(object):
 def formatStatus(status):
     line = ('assist ' + ('ON ' if status.get('assist') else 'off') +
             ' ' + str(status.get('assist_reason', '?')).ljust(12) +
+            ' ready ' + ('yes' if status.get('nepi_ready') else 'no ') +
             ' out_ly ' + str(status.get('out_ly')).rjust(6) +
             ' out_lx ' + str(status.get('out_lx')).rjust(6) +
+            ' out_ry ' + str(status.get('out_ry')).rjust(6) +
             ' out_lt ' + str(status.get('out_lt')).rjust(4) +
             ' out_rt ' + str(status.get('out_rt')).rjust(4) +
             ' demand_bad ' + str(status.get('demand_bad')))
@@ -296,11 +304,10 @@ def sendFor(sender, receiver, seconds, active, surge = 0.0, sway = 0.0, yaw = 0.
             print(formatStatus(status))
 
 def runHold(args, receiver, sender):
-    print('Sending active false for ' + str(EDGE_SEC) + ' s, then holding surge ' + str(args.surge) +
-          ', sway ' + str(args.sway) + ', yaw ' + str(args.yaw) + ' for ' + str(args.seconds) + ' s')
+    print('Ready with surge ' + str(args.surge) + ', sway ' + str(args.sway) + ', heave ' + str(args.heave) +
+          ', yaw ' + str(args.yaw) + ' for ' + str(args.seconds) +
+          ' s. Press RB on the controller to hand the ROV to NEPI.')
     try:
-        sendFor(sender, receiver, EDGE_SEC, False)
-        active = True
         was_on = False
         end = time.monotonic() + args.seconds
         next_send = time.monotonic()
@@ -309,24 +316,25 @@ def runHold(args, receiver, sender):
             if now >= end:
                 break
             if now >= next_send:
-                [success, msg] = sender.send(active, args.surge, args.sway, args.yaw)
+                [success, msg] = sender.send(True, args.surge, args.sway, args.yaw, args.heave)
                 if not success:
                     print(msg)
                 next_send += DEMAND_PERIOD_SEC
             for status in receiver.get_statuses(max(0.0, min(next_send, end) - time.monotonic())):
                 print(formatStatus(status))
-                if status.get('assist'):
-                    was_on = True
-                elif was_on and active:
-                    print('Assist turned off on the Pi (' + str(status.get('assist_reason')) +
-                          '); sending active false from now on')
-                    active = False
+                on = bool(status.get('assist'))
+                if on != was_on:
+                    if on:
+                        print('NEPI control on (' + str(status.get('assist_reason')) + ')')
+                    else:
+                        print('NEPI control off (' + str(status.get('assist_reason')) + '); RB hands it over again')
+                    was_on = on
     except KeyboardInterrupt:
         print('Stopping')
     finally:
-        print('Sending active false for ' + str(EDGE_SEC) + ' s')
+        print('Sending active false for ' + str(RELEASE_SEC) + ' s')
         try:
-            sendFor(sender, receiver, EDGE_SEC, False)
+            sendFor(sender, receiver, RELEASE_SEC, False)
         except KeyboardInterrupt:
             pass
 
@@ -340,9 +348,10 @@ def main():
                         help = "The Pi's UDP port for demands (default 5701)")
     commands = parser.add_subparsers(dest = 'command')
     commands.add_parser('watch', help = 'Print one line per status')
-    hold = commands.add_parser('hold', help = 'Turn assist on and send a fixed demand')
+    hold = commands.add_parser('hold', help = 'Stay ready with a fixed demand; RB on the controller hands over')
     hold.add_argument('--surge', type = demandFraction, default = 0.0, help = 'Surge, -1 to 1, positive forward (default 0)')
     hold.add_argument('--sway', type = demandFraction, default = 0.0, help = 'Sway, -1 to 1, positive right (default 0)')
+    hold.add_argument('--heave', type = demandFraction, default = 0.0, help = 'Heave, -1 to 1, positive down (default 0)')
     hold.add_argument('--yaw', type = demandFraction, default = 0.0, help = 'Yaw, -1 to 1, positive clockwise (default 0)')
     hold.add_argument('--seconds', type = positiveSeconds, default = 10.0, help = 'How long to hold (default 10)')
     args = parser.parse_args()

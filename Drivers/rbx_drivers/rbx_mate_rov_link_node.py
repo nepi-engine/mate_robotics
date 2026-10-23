@@ -19,55 +19,57 @@
 # RBX driver node for the Coral Crusaders MATE ROV, following rbx_gazebo_node.py
 # in nepi_drivers. It presents the ROV as an RBX robot by speaking the NEPI
 # link protocol (Nepi_Connect/LINK_PROTOCOL.md, UDP and JSON) to nepi_link.py on
-# the ROV's control Pi. Where LINK_PROTOCOL.md and nepi_link.py disagree, the
-# code wins; Nepi_Connect/BENCH_SETUP_PLAN.md "Doc Changes Pending" lists where.
+# the ROV's control Pi.
 #
 # The Pi sends a status to this device's status port every 100 ms. This node
-# sends a demand (surge, sway, yaw and an `active` flag) to the Pi's demand
-# port every 100 ms while the link is up. The pilot's stick wins any axis it
-# moves, on the Pi, at all times; NEPI's demand only fills the axes the pilot
-# leaves alone.
+# sends a demand (surge, sway, heave, yaw and an `active` flag) to the Pi's
+# demand port every 100 ms while the link is up.
+#
+# NEPI control (Nepi_Connect/BENCH_SETUP_PLAN.md D3, decided 2026-10-22): the
+# pilot flies, and the pilot's RB hands the ROV to NEPI; NEPI never takes it.
+# The Pi reports NEPI control as the status `assist` flag. While it is on, the
+# ROV follows this node's teleop commands, which come from NEPI's
+# stabilization process or from the Robots page Teleop. RB again, any
+# movement input the pilot pushes past the takeover point, or 2 s with no
+# demand hands the ROV back to the pilot, all on the Pi.
 #
 # One deliberate departure from rbx_gazebo's layout: rbx_gazebo keeps its
 # bridge connection in the node class, because that bridge is thin glue. This
-# link carries the safety logic -- link-up tracking, the on/off rule, the latch,
-# the timeouts and seq -- so all of it lives in MateRovLink below, structured
+# link carries the safety logic -- link-up tracking, the demand rule, the
+# timeouts and seq -- so all of it lives in MateRovLink below, structured
 # after FastMJPGReceiver (Drivers/idx_drivers/idx_net_stream_driver.py) and
 # NepiLink (Nepi_Connect/pi/nepi_link.py). MateRovLink never calls nepi_sdk,
 # nepi_api or ROS, so Nepi_Connect/tools/test_rbx_mate_rov_link.py tests it
 # against the real nepi_link.py without ROS. Everything else follows
 # rbx_gazebo.
 #
-# The on/off rule (BENCH_SETUP_PLAN.md D3 option c on the Pi side):
+# The demand rule:
 #   - The link is up while a valid status from the ROV address arrived within
-#     LINK_TIMEOUT_SEC. While it is down, no demands are sent and teleop
-#     readiness is False.
-#   - While it is up, a demand goes out every DEMAND_PERIOD_SEC, always:
-#     active true while a teleop command newer than TELEOP_CMD_TIMEOUT_SEC is
-#     held and the link is not latched, otherwise active false with every axis
-#     0. The Pi turns assist on only at a false-to-true edge, so the idle
-#     active false stream is what makes the first command engage.
-#   - Teleop readiness is link up, not assist on. RBXRobotIF drops commands
-#     while the robot reports not ready, and assist only comes on after NEPI
-#     sends active true, so gating readiness on assist would make engaging
-#     impossible.
-#   - Latch: while sending active true, the newest status showing assist false
-#     latches the link to active false, if assist was true during this
-#     engagement (RB, the Pi's 2 s timeout) or LATCH_ENGAGE_SEC has passed
-#     since this engagement's first active true (a link outage, or a restarted
-#     Pi script, which ignores a first-ever active true). The latch clears only
-#     after no teleop command has arrived for LATCH_CLEAR_SEC, so the hold
-#     process must stop and restart its commands to engage again. NEPI never
-#     turns assist back on by itself.
-#   - Stop clears the stored command and sets the latch.
+#     LINK_TIMEOUT_SEC. While it is down, no demands are sent, so the Pi counts
+#     NEPI as not ready and ignores RB.
+#   - While it is up, a demand goes out every DEMAND_PERIOD_SEC with active
+#     true, which tells the Pi NEPI is ready. Only release_to_pilot() sends
+#     active false, once, which ends NEPI control on the Pi (nepi_off).
+#   - The demand carries the newest teleop command while NEPI control is on
+#     and the command is newer than TELEOP_CMD_TIMEOUT_SEC; otherwise every
+#     axis is 0 (neutral). While NEPI control is off the stored command is
+#     dropped, so a handover always starts from neutral.
+#   - Teleop readiness is link up and NEPI control on, so RBXRobotIF accepts
+#     teleop commands exactly while NEPI has the ROV.
+#   - Stop clears the stored command (neutral); NEPI keeps the ROV.
 #
-# The ROV has no arm/disarm or mode machinery, no battery, no position fix and
-# no goto controller on the NEPI side, so states, modes, actions, gotos, home
-# and manual motor control are empty or None and RBXRobotIF reports the
-# matching capabilities False. The navpose carries depth and orientation from
-# the Teensy telemetry in each status. Which physical direction each of their
-# signs means has not been measured, and the bench Teensy has no sensors, so
-# on the bench every value reads 0.
+# The robot state shows who has the ROV, PILOT or NEPI. Setting PILOT hands it
+# back (release_to_pilot); setting NEPI is refused, since only the pilot's RB
+# hands it over. The teleop_movement_enabled setting is what makes the Robots
+# page offer Teleop (NepiDeviceRBX-Controls.js), and FALSE turns teleop off.
+#
+# The ROV has no mode machinery, no battery, no position fix and no goto
+# controller on the NEPI side, so modes, actions, gotos, home and manual motor
+# control are empty or None and RBXRobotIF reports the matching capabilities
+# False. The navpose carries depth and orientation from the Teensy telemetry in
+# each status. Which physical direction each of their signs means has not been
+# measured, and the bench Teensy has no sensors, so on the bench every value
+# reads 0.
 
 import copy
 import json
@@ -79,8 +81,9 @@ import time
 from nepi_sdk import nepi_sdk
 from nepi_sdk import nepi_nav
 from nepi_sdk import nepi_utils
+from nepi_sdk import nepi_controls
 
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 
 from nepi_interfaces.msg import AxisControls
 
@@ -96,11 +99,12 @@ FILE_TYPE = 'NODE'
 #########################################
 
 class MateRovLink(object):
-  """The NEPI side of the NEPI link: status in, demands out, the on/off rule.
+  """The NEPI side of the NEPI link: status in, demands out, the demand rule.
 
   A background thread reads the status port. The node's timer calls
   send_demand() every DEMAND_PERIOD_SEC, and RBXRobotIF's callbacks call
-  set_teleop_velocity(), go_stop() and is_link_up(). All of them touch the
+  set_teleop_velocity(), go_stop(), release_to_pilot(), is_link_up() and
+  is_nepi_control(). All of them touch the
   same state, so all of it sits behind one lock; methods named ...Locked
   expect the caller to hold it. clock is a monotonic seconds function,
   injectable so tests can control time; wall_clock fills the demand `t` field
@@ -110,9 +114,10 @@ class MateRovLink(object):
 
   DEMAND_PERIOD_SEC = 0.1 # 10 Hz, the Pi's serial write rate
   LINK_TIMEOUT_SEC = 0.5 # The link is down after this long without a valid status
-  TELEOP_CMD_TIMEOUT_SEC = 0.25 # An older teleop command sends active false
-  LATCH_ENGAGE_SEC = 0.5 # Assist still off this long after an engagement's first active true latches
-  LATCH_CLEAR_SEC = 1.0 # The latch clears after this long with no teleop command
+  # An older teleop command sends neutral. The Robots page resends a held key
+  # every 200 ms and sends neutral on release, so this only acts when the
+  # sender stops; it also keeps a late resend from blipping the thrusters.
+  TELEOP_CMD_TIMEOUT_SEC = 0.5
   MAX_DATAGRAM_BYTES = 1200 # LINK_PROTOCOL "Rules for Every Message", rule 1
   SEQ_MAX = 4294967295
   SEQ_RESTART_SEC = 1.0 # After this long, any status seq is accepted (Pi restarted)
@@ -151,11 +156,10 @@ class MateRovLink(object):
     self.status_seq = -1
     self.status_bad = 0
     self.link_up = False # As of the last send tick, to log changes
-    self.cmd = None # [surge, sway, yaw] of the stored teleop command, protocol axes
-    self.cmd_time = None # clock() of the newest teleop command; go_stop() keeps it
-    self.latched = False
-    self.engage_time = None # clock() of this engagement's first active true; None while sending active false
-    self.engage_assist = False # A status during this engagement showed assist true
+    self.nepi_control = False # As of the last send tick, to log changes
+    self.cmd = None # [surge, sway, heave, yaw] of the stored teleop command, protocol axes
+    self.cmd_time = None # clock() of the newest teleop command
+    self.release_pending = False # The next demand is active false, handing the ROV back to the pilot
     self.seq = int(self.wall_clock() * self.SEQ_PER_SEC) & self.SEQ_MAX
 
 
@@ -211,7 +215,7 @@ class MateRovLink(object):
     return True, 'Stopped receiving on UDP port ' + str(self.status_port)
 
   def is_link_up(self):
-    """Report whether the link is up. This is the robot's teleop readiness.
+    """Report whether the link is up.
 
     Returns:
         bool: True while a valid status from the ROV address arrived within
@@ -224,33 +228,48 @@ class MateRovLink(object):
       self.reportError('is_link_up', e)
       return False
 
+  def is_nepi_control(self):
+    """Report whether NEPI has the ROV. This is the robot's teleop readiness.
+
+    Returns:
+        bool: True while the link is up and the newest status shows NEPI
+            control on (the Pi's `assist`). False on any error.
+    """
+    try:
+      with self.lock:
+        return self.nepiControlLocked(self.clock())
+    except Exception as e:
+      self.reportError('is_nepi_control', e)
+      return False
+
   def set_teleop_velocity(self, linear_x, linear_y, linear_z, angular_z):
     """Store a teleop command, mapped from ROS axes to protocol axes.
 
     This is the only place the axes are mapped: surge = linear_x, sway =
-    -linear_y (ROS y is positive left, protocol sway positive right), and yaw =
+    -linear_y (ROS y is positive left, protocol sway positive right), heave =
+    -linear_z (ROS z is positive up, protocol heave positive down), and yaw =
     -angular_z (ROS turns positive counter-clockwise, the protocol clockwise
-    seen from above). linear_z is ignored, because the Teensy holds depth
-    itself. Each value is clamped to -1 to 1. The Pi applies its own caps and
-    per-vehicle signs, so none are applied here.
+    seen from above). Each value is clamped to -1 to 1. The Pi applies its own
+    caps and per-vehicle signs, so none are applied here.
 
     Args:
         linear_x (float): Forward ratio, -1 to 1.
         linear_y (float): Left ratio, -1 to 1.
-        linear_z (float): Up ratio. Ignored.
+        linear_z (float): Up ratio, -1 to 1.
         angular_z (float): Counter-clockwise turn ratio, -1 to 1.
 
     Returns:
         list: [success (bool), msg (str)]. success is False, and nothing is
-            stored, when a used value is not a finite number.
+            stored, when a value is not a finite number.
     """
     try:
-      for value in [linear_x, linear_y, angular_z]:
+      for value in [linear_x, linear_y, linear_z, angular_z]:
         if not self.isNumber(value):
           msg = 'Teleop command dropped: values must be finite numbers'
           self.printLimited('teleop', msg)
           return False, msg
-      cmd = [self.clampAxis(linear_x), self.clampAxis(-linear_y), self.clampAxis(-angular_z)]
+      cmd = [self.clampAxis(linear_x), self.clampAxis(-linear_y), self.clampAxis(-linear_z),
+             self.clampAxis(-angular_z)]
       with self.lock:
         self.cmd = cmd
         self.cmd_time = self.clock()
@@ -260,11 +279,10 @@ class MateRovLink(object):
       return False, 'Teleop error: ' + str(e)
 
   def go_stop(self):
-    """Clear the stored teleop command and set the latch.
+    """Clear the stored teleop command, so the next demand is neutral.
 
-    The next demand is active false, so the Pi turns assist off (nepi_off). The
-    latch then holds active false until no teleop command has arrived for
-    LATCH_CLEAR_SEC.
+    NEPI keeps the ROV; the Teensy's own depth and heading holds keep it steady
+    while every axis is neutral.
 
     Returns:
         list: [success (bool), msg (str)].
@@ -272,18 +290,35 @@ class MateRovLink(object):
     try:
       with self.lock:
         self.cmd = None
-        latched = self.latched
-        self.latched = True
-      if not latched:
-        self.printMessage('Stop: latched to active false until teleop commands pause for ' +
-                          str(self.LATCH_CLEAR_SEC) + ' s')
       return True, 'Stopped'
     except Exception as e:
       self.reportError('go_stop', e)
       return False, 'Stop error: ' + str(e)
 
+  def release_to_pilot(self):
+    """Hand the ROV back to the pilot.
+
+    The next demand is active false, which ends NEPI control on the Pi
+    (nepi_off); the demands after it are active true again, so NEPI stays
+    ready and the pilot's RB can hand the ROV over again.
+
+    Returns:
+        list: [success (bool), msg (str)]. success is False while the link is
+            down, since no demand can go out then.
+    """
+    try:
+      with self.lock:
+        if not self.linkUpLocked(self.clock()):
+          return False, 'Link down: nothing to release'
+        self.cmd = None
+        self.release_pending = True
+      return True, 'Releasing the ROV to the pilot'
+    except Exception as e:
+      self.reportError('release_to_pilot', e)
+      return False, 'Release error: ' + str(e)
+
   def send_demand(self):
-    """Send the next demand, per the on/off rule. The node calls this every DEMAND_PERIOD_SEC.
+    """Send the next demand, per the demand rule. The node calls this every DEMAND_PERIOD_SEC.
 
     Returns:
         list: [sent (bool), msg (str)]. Nothing is sent while the link is
@@ -330,10 +365,13 @@ class MateRovLink(object):
     Returns:
         dict: running (bool) -- the receive thread is started;
             link_up (bool) -- as in is_link_up();
-            latched (bool) -- demands are held at active false;
+            nepi_control (bool) -- as in is_nepi_control();
             assist (bool), assist_reason (str), pilot_surge, pilot_sway,
                 pilot_yaw, pilot_depth, slow (bool) -- from the newest status,
-                False and '' before the first;
+                False and '' before the first. assist is NEPI control as
+                the Pi last reported it, and assist_reason why it last changed:
+                pilot_button (RB), pilot_stick (the takeover point), timeout,
+                nepi_off (release_to_pilot) or start;
             demand_age_ms, tn_age_ms (int) -- the Pi's ages plus the newest
                 status's age on this computer, so they keep growing while the
                 link is down; -1 when the Pi reports none;
@@ -344,7 +382,7 @@ class MateRovLink(object):
         now = self.clock()
         status = self.status
         health = dict(running = self.recv_thread is not None, link_up = self.linkUpLocked(now),
-                      latched = self.latched, assist = False, assist_reason = '',
+                      nepi_control = self.nepiControlLocked(now), assist = False, assist_reason = '',
                       pilot_surge = False, pilot_sway = False, pilot_yaw = False, pilot_depth = False,
                       slow = False, demand_age_ms = -1, tn_age_ms = -1, status_bad = self.status_bad)
         if status is not None:
@@ -356,7 +394,7 @@ class MateRovLink(object):
         return health
     except Exception as e:
       self.reportError('get_health', e)
-      return dict(running = False, link_up = False, latched = True)
+      return dict(running = False, link_up = False, nepi_control = False)
 
   def get_tn(self):
     """Return the newest Teensy telemetry and its age.
@@ -379,19 +417,18 @@ class MateRovLink(object):
   def linkUpLocked(self, now):
     return self.status_time is not None and now - self.status_time <= self.LINK_TIMEOUT_SEC
 
+  def nepiControlLocked(self, now):
+    return self.linkUpLocked(now) and self.status['assist']
+
   def ageNowLocked(self, age_ms, now):
     if age_ms < 0:
       return -1
     return age_ms + max(0, int(round((now - self.status_time) * 1000)))
 
   def nextDemandLocked(self, now):
-    # The on/off rule, in the order it is decided. Returns [demand or None, notes to log].
+    # The demand rule, in the order it is decided. Returns [demand or None, notes to log].
     notes = []
-    # Latch clear: no teleop command for LATCH_CLEAR_SEC
-    if self.latched and (self.cmd_time is None or now - self.cmd_time >= self.LATCH_CLEAR_SEC):
-      self.latched = False
-      notes.append('Latch cleared: no teleop command for ' + str(self.LATCH_CLEAR_SEC) + ' s')
-    # Link down: no demand at all
+    # Link down: no demand at all, so the Pi counts NEPI as not ready
     link_up = self.linkUpLocked(now)
     if link_up != self.link_up:
       self.link_up = link_up
@@ -399,29 +436,29 @@ class MateRovLink(object):
         notes.append('Link up: status arriving from the ROV')
       else:
         notes.append('Link down: no valid status for ' + str(self.LINK_TIMEOUT_SEC) + ' s; demands stopped')
+    nepi_control = self.nepiControlLocked(now)
+    if nepi_control != self.nepi_control:
+      self.nepi_control = nepi_control
+      if nepi_control:
+        notes.append('NEPI control on: the pilot handed over the ROV')
+      elif link_up:
+        notes.append('NEPI control off (' + self.status['assist_reason'] + '): the pilot has the ROV')
     if not link_up:
-      self.engage_time = None
+      self.cmd = None
+      self.release_pending = False
       return None, notes
-    # Active true needs a fresh command and no latch
-    active = (not self.latched and self.cmd is not None and
-              now - self.cmd_time <= self.TELEOP_CMD_TIMEOUT_SEC)
-    if active:
-      if self.engage_time is None:
-        self.engage_time = now
-        self.engage_assist = False
-      elif (self.status['assist'] is False and
-            (self.engage_assist or now - self.engage_time >= self.LATCH_ENGAGE_SEC)):
-        self.latched = True
-        active = False
-        notes.append('Latched to active false: assist off on the ROV (' + self.status['assist_reason'] +
-                     '); pause teleop commands for ' + str(self.LATCH_CLEAR_SEC) + ' s to engage again')
-    if not active:
-      self.engage_time = None
-    [surge, sway, yaw] = [0.0, 0.0, 0.0]
-    if active:
-      [surge, sway, yaw] = self.cmd
+    # Active true says NEPI is ready; a pending release sends active false once
+    active = not self.release_pending
+    self.release_pending = False
+    # Values only while NEPI has the ROV, from a fresh command; otherwise neutral.
+    # Without NEPI control the command is dropped, so a handover starts neutral.
+    if not nepi_control:
+      self.cmd = None
+    [surge, sway, heave, yaw] = [0.0, 0.0, 0.0, 0.0]
+    if active and self.cmd is not None and now - self.cmd_time <= self.TELEOP_CMD_TIMEOUT_SEC:
+      [surge, sway, heave, yaw] = self.cmd
     demand = {'v': 1, 'type': 'demand', 'seq': self.seq, 't': round(self.wall_clock(), 3), 'active': active,
-              'surge': surge, 'sway': sway, 'yaw': yaw, 'pitch': 0.0, 'roll': 0.0}
+              'surge': surge, 'sway': sway, 'heave': heave, 'yaw': yaw, 'pitch': 0.0, 'roll': 0.0}
     self.seq = (self.seq + 1) & self.SEQ_MAX
     return demand, notes
 
@@ -437,8 +474,6 @@ class MateRovLink(object):
     self.status = status
     self.status_seq = status['seq']
     self.status_time = now
-    if self.engage_time is not None and status['assist']:
-      self.engage_assist = True
     return True, msg
 
   def parseStatus(self, datagram, source_ip):
@@ -551,18 +586,30 @@ class MateRovLink(object):
 
 class MateRovLinkNode:
 
-  # The ROV has no arm/disarm or mode machinery and no one-shot actions.
-  # RBXRobotIF handles empty lists correctly (bounds checks reject any index,
-  # status shows "Not Set"), the same as rbx_gazebo's empty states, modes and
-  # go actions. The get*Ind functions must still be real callables, since
+  # The state is who has the ROV. The ROV has no mode machinery and no one-shot
+  # actions; RBXRobotIF handles empty lists correctly (bounds checks reject any
+  # index, status shows "Not Set"), the same as rbx_gazebo's empty modes and go
+  # actions. The get*Ind functions must still be real callables, since
   # RBXRobotIF calls them unconditionally.
-  RBX_STATES = []
+  RBX_STATES = ["PILOT", "NEPI"]
   RBX_MODES = []
   RBX_SETUP_ACTIONS = []
   RBX_GO_ACTIONS = []
 
   NAVPOSE_UPDATE_RATE = 10
   TN_MAX_AGE_MS = 500 # The navpose skips Teensy telemetry older than this
+
+  # teleop_movement_enabled is the setting the Robots page looks for before it
+  # offers Teleop (NepiDeviceRBX-Controls.js), as in rbx_ardupilot.
+  CAP_SETTINGS = dict(
+    teleop_movement_enabled = {"type":"Discrete","name":"teleop_movement_enabled","options":["TRUE","FALSE"]}
+  )
+
+  FACTORY_SETTINGS = dict(
+    teleop_movement_enabled = {"type":"Discrete","name":"teleop_movement_enabled","value":"TRUE"}
+  )
+
+  FACTORY_SETTINGS_OVERRIDES = dict()
 
   #######################
   ### Node Initialization
@@ -600,16 +647,19 @@ class MateRovLinkNode:
       return
 
     ##############################
-    # Stop and navpose state
+    # Settings, stop and navpose state
+    self.settings_dict = self.initSettingsDict()
     self.stop_triggered = False
+    self.state_ind_last = None # As of the last demand tick, to republish RBX info on a change
     self.navpose_dict = copy.deepcopy(nepi_nav.BLANK_NAVPOSE_DICT)
 
-    # Surge, sway and yaw are commandable. Depth stays with the Teensy's own
-    # depth hold, and version 1 of the link carries no pitch or roll.
+    # Surge, sway, heave and yaw are commandable. With heave at 0 the Teensy's
+    # own depth hold keeps the depth, and version 1 of the link carries no
+    # pitch or roll.
     self.axis_controls = AxisControls()
     self.axis_controls.x = True
     self.axis_controls.y = True
-    self.axis_controls.z = False
+    self.axis_controls.z = True
     self.axis_controls.roll = False
     self.axis_controls.pitch = False
     self.axis_controls.yaw = True
@@ -646,8 +696,8 @@ class MateRovLinkNode:
     self.msg_if.pub_info(str(self.device_info_dict))
 
     self.rbx_if = RBXRobotIF(device_info = self.device_info_dict,
-                             getSettingsFunction = None,
-                             setSettingFunction = None,
+                             getSettingsFunction = self.getSettingsFunction,
+                             setSettingFunction = self.setSettingFunction,
                              axisControls = self.axis_controls,
                              getBatteryPercentFunction = None,
                              states = self.RBX_STATES,
@@ -681,6 +731,13 @@ class MateRovLinkNode:
 
     self.msg_if.pub_info("... RBX interface running")
 
+    # RBXRobotIF republishes its info, which carries the state the Robots page
+    # shows under Set State, only when a state is set through NEPI. The pilot's
+    # RB changes it on the Pi, so sendDemandCb asks for a republish through the
+    # IF's own publish_info topic whenever the state changes.
+    self.publish_info_pub = nepi_sdk.create_publisher(nepi_sdk.create_namespace(self.rbx_if.namespace, 'publish_info'),
+                                                      Empty, queue_size = 1)
+
     ## Start the demand tick
     nepi_sdk.start_timer_process(self.link.DEMAND_PERIOD_SEC, self.sendDemandCb)
 
@@ -690,16 +747,79 @@ class MateRovLinkNode:
     nepi_sdk.spin()
 
 
+  #**********************
+  # Setting functions
+
+  def initSettingsDict(self):
+    init_settings_dict = dict()
+    for setting_name in self.CAP_SETTINGS.keys():
+      cap_setting = self.CAP_SETTINGS[setting_name]
+      setting_type = cap_setting['type']
+      setting_dict = dict()
+      setting_dict['type'] = setting_type
+      if 'options' in cap_setting.keys():
+        setting_dict['options'] = [str(option) for option in cap_setting['options']]
+      default = None
+      if setting_name in self.FACTORY_SETTINGS.keys():
+        default = self.FACTORY_SETTINGS[setting_name]['value']
+      if setting_name in self.FACTORY_SETTINGS_OVERRIDES.keys():
+        default = self.FACTORY_SETTINGS_OVERRIDES[setting_name]
+      if default is None:
+        continue
+      setting_dict['default'] = str(default)
+      init_settings_dict[setting_name] = setting_dict
+    settings_dict = nepi_controls.create_controls_dict(init_settings_dict)
+    self.msg_if.pub_info("Initialized Settings: " + str(nepi_controls.get_values_dict(settings_dict)))
+    return settings_dict
+
+  def refreshSettingsDict(self):
+    # Nothing on the ROV to read back; the settings live only here
+    return copy.deepcopy(self.settings_dict)
+
+  def getSettingSelection(self, setting_name):
+    # nepi_controls.get_value() hands a Selection back as a one-element list
+    # (['TRUE']), so this returns the selected option itself.
+    value = nepi_controls.get_value(self.settings_dict, setting_name)
+    if isinstance(value, list):
+      value = value[0] if len(value) > 0 else None
+    return value
+
+  def getSettingsFunction(self):
+    # Deep copy: SettingsIF keeps what this returns and mutates it in place
+    return copy.deepcopy(self.settings_dict)
+
+  def setSettingFunction(self, setting_name, setting_value):
+    success = False
+    setting_str = setting_name + ":" + str(setting_value)
+    if setting_name not in self.settings_dict.keys():
+      msg = (self.node_name + " Setting name " + setting_str + " is not supported")
+      return success, msg, copy.deepcopy(self.settings_dict)
+    if nepi_controls.get_clean_value(self.settings_dict, setting_name, setting_value) is None:
+      msg = (self.node_name + " Setting data " + setting_str + " is not valid")
+      return success, msg, copy.deepcopy(self.settings_dict)
+    self.settings_dict = nepi_controls.set_value(self.settings_dict, setting_name, setting_value)
+    success = True
+    msg = (self.node_name + " UPDATED SETTINGS " + setting_str)
+    return success, msg, copy.deepcopy(self.settings_dict)
+
   ##########################
   # RBX Interface Functions
 
   def getStateInd(self):
-    # No robot states (empty RBX_STATES). RBXRobotIF still calls this
-    # unconditionally and displays "Not Set" for the empty list.
+    # PILOT (0) or NEPI (1): who has the ROV, as the Pi last reported it
+    if self.link is not None and self.link.is_nepi_control():
+      return 1
     return 0
 
   def setStateInd(self, state_ind):
-    # Unreachable with empty RBX_STATES (RBXRobotIF bounds-checks first)
+    # Only the pilot's RB hands the ROV to NEPI; NEPI can only hand it back
+    if self.RBX_STATES[state_ind] == "PILOT":
+      if self.link.is_nepi_control():
+        [success, msg] = self.link.release_to_pilot()
+        self.msg_if.pub_info(msg)
+        return success
+      return True
+    self.msg_if.pub_warn("Only the pilot's RB on the controller hands the ROV to NEPI")
     return False
 
   def getModeInd(self):
@@ -715,10 +835,11 @@ class MateRovLinkNode:
     return triggered
 
   def teleopControlsReady(self):
-    # Link up, not assist on: RBXRobotIF drops teleop commands while this is
-    # False, and assist only comes on after a command has gone out as active
-    # true, so gating on assist would make engaging impossible.
-    return self.link.is_link_up()
+    # Teleop drives the ROV only while NEPI has it, and only while the
+    # teleop_movement_enabled setting allows it
+    if self.getSettingSelection('teleop_movement_enabled') != 'TRUE':
+      return False
+    return self.link.is_nepi_control()
 
   def setTeleopVelocity(self, linear_x, linear_y, linear_z, angular_z):
     # Ratios from -1 to 1 in ROS axes. The link maps them to protocol axes and
@@ -734,9 +855,14 @@ class MateRovLinkNode:
     # Depth and orientation from the newest Teensy telemetry. The update is
     # skipped while there is none or it is older than TN_MAX_AGE_MS, which
     # includes the whole time the link is down, since the telemetry's age keeps
-    # growing then.
+    # growing then. Until the first fresh telemetry it returns None, not the
+    # blank dict: NPXDeviceIF fixes has_depth and has_orientation from the first
+    # dict it gets, so a blank one would leave both False for the node's life
+    # whenever the driver starts before the ROV Pi is sending.
     [tn, tn_age_ms] = self.link.get_tn()
     if tn is None or tn_age_ms < 0 or tn_age_ms > self.TN_MAX_AGE_MS:
+      if self.navpose_dict['has_depth'] == False:
+        return None
       return self.navpose_dict
     tn_time = nepi_utils.get_time() - tn_age_ms / 1000.0
     self.navpose_dict['has_depth'] = True
@@ -767,10 +893,14 @@ class MateRovLinkNode:
   ### Link Processes
 
   def sendDemandCb(self, timer):
-    # One demand per tick, decided by the link's on/off rule, then the link
-    # state for the hold process.
+    # One demand per tick, decided by the link's demand rule, then the link
+    # state for the hold process, and the RBX info when the state changed.
     self.link.send_demand()
     self.link_status_pub.publish(String(data = json.dumps(self.link.get_health())))
+    state_ind = self.getStateInd()
+    if state_ind != self.state_ind_last:
+      self.state_ind_last = state_ind
+      self.publish_info_pub.publish(Empty())
 
   #######################
   # Node Cleanup Function
@@ -778,13 +908,13 @@ class MateRovLinkNode:
   def cleanup_actions(self):
     """Hands the ROV back to the pilot on node shutdown.
 
-    Sends one last active false demand if the link is up, so the Pi turns
-    assist off at once (nepi_off) instead of after its 2 s timeout, then stops
+    Sends one last active false demand if the link is up, so the Pi ends NEPI
+    control at once (nepi_off) instead of after its 2 s timeout, then stops
     the link.
     """
     self.msg_if.pub_info("Shutting down: Executing script cleanup actions")
     if self.link is not None:
-      self.link.go_stop()
+      self.link.release_to_pilot()
       self.link.send_demand()
       self.link.stop()
 
