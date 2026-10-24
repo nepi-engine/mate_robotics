@@ -7,6 +7,7 @@
 - The robot stays sealed. The Teensy firmware does not change. The team's Pi script gains about five lines and one new file that we supply (`nepi_link.py`). The video command gains one extra output.
 - Today's firmware holds depth and heading, but not pitch or roll, and has no input for them. So NEPI can hold position and help hold heading. Depth stays with the Teensy's pressure sensor. Pitch and roll need an optional firmware change by the team (see Section 3).
 - The exact wire contract is in [LINK_PROTOCOL.md](LINK_PROTOCOL.md). This file explains the plan and does not repeat it.
+- The NEPI driver's current state, the problems to fix before stabilization, and its acceptance tests are in [DRIVER_HANDOFF.md](DRIVER_HANDOFF.md).
 
 The team's code was read at commit `1af4984` of github.com/CoralCrusaders/rov-26. Citations look like `file:line` and point to that commit, unless they name a NEPI repository or a file in this repo's `Docs` folder.
 
