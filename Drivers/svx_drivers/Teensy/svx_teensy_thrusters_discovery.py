@@ -120,6 +120,21 @@ class SvxTeensyThrustersDiscovery:
     }
     CUSTOM_ESC_MODEL = 'Custom'
 
+    # thruster_model -> the esc_model its published thrust data was measured
+    # with (Docs/Motors/bluerobotics_t200_thruster.md). A thrust map needs
+    # both; Custom has no data, so it runs only with the pulse map. Used here
+    # only to validate; the node holds the data and a table with the same
+    # names. Keep the two in step.
+    THRUSTER_MODELS = {
+        'BlueRobotics T200 (R2)': dict(esc_model = 'BlueRobotics Basic ESC (BESC30-R3)'),
+    }
+    CUSTOM_THRUSTER_MODEL = 'Custom'
+    # thrust_map options; the node holds the same list. Keep the two in step.
+    THRUST_MAPS = ['pulse', 'thrust', 'thrust_symmetric']
+    PULSE_MAP = 'pulse'
+    # The supply voltages the T200 data covers
+    SUPPLY_VOLTAGE_V_RANGE = (10.0, 20.0)
+
     # Limits enforced by the firmware's CF command (PROTOCOL.md 5), checked
     # here first so a bad option is reported by name instead of as a
     # rejected frame.
@@ -400,12 +415,36 @@ class SvxTeensyThrustersDiscovery:
                     raise ValueError("reversed_thrusters entry " + str(index) + " is not a motor index (0-" +
                                      str(len(thruster_channels) - 1) + ")")
 
+            thruster_model = self.optionValue(options, 'thruster_model', 'BlueRobotics T200 (R2)')
+            if thruster_model not in self.THRUSTER_MODELS and thruster_model != self.CUSTOM_THRUSTER_MODEL:
+                raise ValueError("thruster_model '" + thruster_model + "' is not a known thruster")
+            thrust_map = self.optionValue(options, 'thrust_map', 'thrust')
+            if thrust_map not in self.THRUST_MAPS:
+                raise ValueError("thrust_map '" + thrust_map + "' must be one of " + str(self.THRUST_MAPS))
+            # A thrust map inverts the thruster's published data, so it needs a
+            # thruster with data and the ESC the data was measured with.
+            # supply_voltage_v matters only then, so it is parsed only then.
+            if thrust_map != self.PULSE_MAP:
+                if thruster_model not in self.THRUSTER_MODELS:
+                    raise ValueError("thrust_map " + thrust_map + " needs a thruster_model with thrust data " +
+                                     str(list(self.THRUSTER_MODELS.keys())) + ", but thruster_model is '" +
+                                     thruster_model + "'; use thrust_map pulse for this thruster")
+                data_esc_model = self.THRUSTER_MODELS[thruster_model]['esc_model']
+                if esc_model != data_esc_model:
+                    raise ValueError("thrust_map " + thrust_map + " needs esc_model '" + data_esc_model +
+                                     "', the ESC the " + thruster_model + " data was measured with, but esc_model is '" +
+                                     esc_model + "'; use thrust_map pulse with this ESC")
+                supply_voltage_v = self.floatOption(options, 'supply_voltage_v', 12.0, *self.SUPPLY_VOLTAGE_V_RANGE)
+
             # The parsed option values, not the effective pulses: the node
             # resolves esc_model into pulse widths itself (its ESC_MODELS table
-            # mirrors the one above). custom_* are passed only for Custom.
+            # mirrors the one above). custom_* are passed only for Custom, and
+            # supply_voltage_v only for a thrust map, so editing an option
+            # that does not apply never restarts the node.
             config = dict(
                 esc_model = esc_model,
-                thruster_model = self.optionValue(options, 'thruster_model', 'BlueRobotics T200 (R2)'),
+                thruster_model = thruster_model,
+                thrust_map = thrust_map,
                 thruster_channels = thruster_channels,
                 reversed_thrusters = reversed_thrusters,
                 max_thrust_ratio = self.floatOption(options, 'max_thrust_ratio', 1.0, 0.0, 1.0),
@@ -419,6 +458,8 @@ class SvxTeensyThrustersDiscovery:
                 config['custom_pulse_stop_us'] = pstop
                 config['custom_pulse_max_us'] = pmax
                 config['custom_deadband_us'] = dband
+            if thrust_map != self.PULSE_MAP:
+                config['supply_voltage_v'] = supply_voltage_v
         except Exception as e:
             self.logOnChange('config', "Invalid thruster options, no thruster node launched: " + str(e))
             return 'invalid'

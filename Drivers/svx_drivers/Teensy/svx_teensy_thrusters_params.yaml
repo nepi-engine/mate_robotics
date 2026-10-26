@@ -52,7 +52,7 @@ driver:
         value: 'hold'
       esc_model:
         type: Selection
-        description: 'Which ESC is on every thruster channel; it sets the pulse widths. BlueRobotics Basic ESC (BESC30-R3), the default, fixes 1100 us full reverse, 1500 us stop, 1900 us full forward and a 25 us deadband either side of stop -- the documented values, not the ESC''s internal 1112/1512/1912 (Docs/Motors/bluerobotics_basic_esc.md). Custom uses custom_pulse_min_us, custom_pulse_stop_us, custom_pulse_max_us and custom_deadband_us instead. Changing this restarts the thruster node, which re-runs the arming hold.'
+        description: 'Which ESC is on every thruster channel; it sets the pulse widths. BlueRobotics Basic ESC (BESC30-R3), the default, fixes 1100 us full reverse, 1500 us stop, 1900 us full forward and a 25 us deadband either side of stop -- the documented values, not the ESC''s internal 1112/1512/1912 (Docs/Motors/bluerobotics_basic_esc.md). Custom uses custom_pulse_min_us, custom_pulse_stop_us, custom_pulse_max_us and custom_deadband_us instead. The thrust maps (thrust_map thrust and thrust_symmetric) need the Basic ESC, the ESC the T200 thrust data was measured with; with Custom, set thrust_map to pulse. Changing this restarts the thruster node, which re-runs the arming hold.'
         options:
           - 'BlueRobotics Basic ESC (BESC30-R3)'
           - 'Custom'
@@ -60,12 +60,29 @@ driver:
         value: 'BlueRobotics Basic ESC (BESC30-R3)'
       thruster_model:
         type: Selection
-        description: 'Which thruster each ESC drives. Recorded in the device info and the logs only; it does not change the pulse math, which esc_model sets. Default BlueRobotics T200 (R2). Two T200 facts the driver cannot enforce because nothing reports back: it must not run dry for more than 10 s, and its thrust depends on supply voltage and is weaker in reverse (Docs/Motors/bluerobotics_t200_thruster.md). Bench-test in water.'
+        description: 'Which thruster each ESC drives. Default BlueRobotics T200 (R2). Under a thrust map (thrust_map thrust or thrust_symmetric) it selects the published thrust data the map uses; Custom has no data, so it works only with thrust_map pulse. It is also recorded in the device info and the logs. Two T200 facts the driver cannot enforce because nothing reports back: it must not run dry for more than 10 s, and its thrust depends on supply voltage and is weaker in reverse; the thrust maps take the voltage from supply_voltage_v, not from a measurement (Docs/Motors/bluerobotics_t200_thruster.md). Bench-test in water. Changing this restarts the thruster node, which re-runs the arming hold.'
         options:
           - 'BlueRobotics T200 (R2)'
           - 'Custom'
         default: 'BlueRobotics T200 (R2)'
         value: 'BlueRobotics T200 (R2)'
+      thrust_map:
+        type: Selection
+        description: 'How a thruster''s speed ratio becomes a pulse width. thrust, the default, makes the ratio a fraction of the thruster''s full thrust in the direction its ESC is driven, from Blue Robotics'' published T200 thrust data at supply_voltage_v: thrust is linear in the ratio, 1.0 is full forward or full reverse thrust, and reverse stays weaker than forward (75 to 79% of it). thrust_symmetric makes the ratio a fraction of the weaker direction''s full thrust (reverse, for the T200) both ways, so the same ratio gives the same thrust either way and forward is capped at 75 to 79% of its full thrust. pulse is the linear pulse-width map the driver used before: the ratio sets the pulse width directly, so thrust is not linear in it. Both thrust maps need thruster_model BlueRobotics T200 (R2) and esc_model BlueRobotics Basic ESC (BESC30-R3), the ESC the data was measured with; pulse works with any thruster_model and esc_model. The data is static bollard thrust from a single 2019 T200, an R1 unit, so thrust on the vehicle will differ (Docs/Motors/bluerobotics_t200_thruster.md, Open Question 7). The thrust maps assume each thruster gives its forward thrust (the stronger direction: water enters at the nose cone and leaves the back of the nozzle) for pulses above stop, as in the published data. If a thruster''s phase wiring or propeller makes pulses above stop push water out of the front, its two curves are swapped. Check each thruster with a short in-water pulse at 1550 us while watching the flow direction (Open Question 2). Changing this restarts the thruster node, which re-runs the arming hold.'
+        options:
+          - 'pulse'
+          - 'thrust'
+          - 'thrust_symmetric'
+        default: 'thrust'
+        value: 'thrust'
+      supply_voltage_v:
+        type: Float
+        description: 'Thrust maps only: the supply voltage at the ESCs, 10.0-20.0 V, the range of the published T200 data. Default 12.0. It picks the thrust curve: the published curve for 10, 12, 14, 16, 18 or 20 V, otherwise a linear interpolation between the two neighboring curves at every pulse width. It is a fixed setting, not a measurement: nothing measures the battery (Docs/Motors/bluerobotics_t200_thruster.md, Open Question 3), so thrust drifts from the map as the battery drains. Set it to the battery''s nominal voltage under load. Ignored with thrust_map pulse; under a thrust map, changing it restarts the thruster node, which re-runs the arming hold.'
+        options:
+          - '10.0'
+          - '20.0'
+        default: '12.0'
+        value: '12.0'
       thruster_channels:
         type: 'String'
         description: 'Which Teensy channels carry thrusters, in thruster order: comma-separated channel numbers 0-7, e.g. "0,1,2,3,4,5". The first entry becomes motor_0, the second motor_1, and so on. Channel n is a fixed Teensy pin (0:2, 1:3, 2:4, 3:5, 4:6, 5:9, 6:22, 7:23; see Firmware/teensy_thrusters/PROTOCOL.md section 4). Default "0,1,2,3,4,5". A channel not listed outputs no pulses at all, so an ESC on it never arms. The ESCs cannot be detected (they send nothing back), so this list is the only record of what is wired; an invalid list (out of range, repeated, unparseable) launches nothing and logs why.'
@@ -73,12 +90,12 @@ driver:
         value: '0,1,2,3,4,5'
       reversed_thrusters:
         type: 'String'
-        description: 'Motor indexes (not channels) whose command is mirrored about the stop pulse, comma-separated, e.g. "1,4" reverses motor_1 and motor_4. Default empty. Use it when a thruster pushes the wrong way because of its propeller handedness or how its three phase wires were connected; mirroring in software is the documented alternative to swapping two motor wires (Docs/Motors/bluerobotics_t200_thruster.md).'
+        description: 'Motor indexes (not channels) whose command is mirrored about the stop pulse, comma-separated, e.g. "1,4" reverses motor_1 and motor_4. Default empty. Use it when a thruster pushes the wrong way because of its propeller handedness or how its three phase wires were connected; mirroring in software is the documented alternative to swapping two motor wires (Docs/Motors/bluerobotics_t200_thruster.md). Under a thrust map it reverses the direction fed into the map instead, so a reversed thruster''s forward command uses the reverse thrust curve.'
         default: ''
         value: ''
       max_thrust_ratio:
         type: Float
-        description: 'Cap applied to every thruster''s speed ratio before it becomes a pulse, 0.0-1.0. Default 1.0 (no cap). This is the tool for staying under the vehicle''s current limit: a T200 at full throttle draws about 32 A at 20 V (Docs/Motors/bluerobotics_t200_thruster.md), so several at once can exceed a tether or fuse budget. Current is not linear in pulse width, so check the T200 current table for the cap that fits your budget and supply voltage.'
+        description: 'Cap applied to every thruster''s speed ratio before it becomes a pulse, 0.0-1.0. Default 1.0 (no cap). This is the tool for staying under the vehicle''s current limit: a T200 at full throttle draws about 32 A at 20 V (Docs/Motors/bluerobotics_t200_thruster.md), so several at once can exceed a tether or fuse budget. Current is not linear in pulse width, so check the T200 current table for the cap that fits your budget and supply voltage. Under a thrust map (thrust_map) the cap is a fraction of full-scale thrust instead, and current is not linear in thrust either, so the current table is still the check.'
         options:
           - '0.0'
           - '1.0'
