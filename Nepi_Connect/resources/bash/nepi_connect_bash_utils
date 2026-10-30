@@ -1,0 +1,83 @@
+#!/bin/bash
+##
+## Copyright (c) 2024 Numurus, LLC <https://www.numurus.com>.
+##
+## This file is part of nepi-engine
+## (see https://github.com/nepi-engine).
+##
+## License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
+##
+
+# Shell functions for the NEPI Connect service on the robot's Pi.
+#
+# nepi_connect_setup.sh copies this file to ~/.nepi_connect_bash_utils and has
+# .bashrc source that copy, with NEPI_CONNECT_RESOURCES_FOLDER pinned to this
+# checkout. nepi_connect_start.sh and nepi_connect.sh source the checkout's
+# own copy.
+
+export NEPI_CONNECT_BASH_FOLDER=$(cd -P "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)
+
+# The user's copy of the settings, which nepi_connect_setup.sh creates.
+export NEPI_CONNECT_USER_CONFIG=${HOME}/nepi_connect/config/nepi_connect_config.sh
+
+# Load the service settings: the defaults in the checkout, then the user's
+# copy. A setting added to the defaults later still gets a value on a Pi that
+# was set up before it existed.
+function nepi_connect_load_config(){
+    local resources_folder=${NEPI_CONNECT_RESOURCES_FOLDER:-$(dirname "${NEPI_CONNECT_BASH_FOLDER}")}
+    local defaults_file=${resources_folder}/config/nepi_connect_config.sh
+
+    if [[ ! -f "$defaults_file" ]]; then
+        echo "Settings file not found: ${defaults_file}"
+        return 1
+    fi
+    source "$defaults_file"
+    if [[ -f "$NEPI_CONNECT_USER_CONFIG" ]]; then
+        source "$NEPI_CONNECT_USER_CONFIG"
+    fi
+}
+export -f nepi_connect_load_config
+
+# Start the NEPI Connect service, which starts the camera stream.
+# Usage: nepi_connect_start
+function nepi_connect_start(){
+    local resources_folder=${NEPI_CONNECT_RESOURCES_FOLDER:-$(dirname "${NEPI_CONNECT_BASH_FOLDER}")}
+    local start_script=${resources_folder}/config/nepi_connect_start.sh
+
+    if [[ ! -f "$start_script" ]]; then
+        echo "nepi_connect_start.sh not found at: ${start_script}"
+        return 1
+    fi
+
+    bash "$start_script" "$@"
+}
+export -f nepi_connect_start
+
+# Stop the NEPI Connect service and the stream it started. The service stops
+# the stream itself, on SIGTERM (see the trap in nepi_connect.sh); this just
+# signals it and waits.
+# Usage: nepi_connect_stop
+function nepi_connect_stop(){
+    local resources_folder=${NEPI_CONNECT_RESOURCES_FOLDER:-$(dirname "${NEPI_CONNECT_BASH_FOLDER}")}
+    local service=${resources_folder}/config/nepi_connect.sh
+    local pids waited=0
+
+    # Matched the same way nepi_connect_start.sh checks for a running service.
+    pids=$(pgrep -f "bash ${service}")
+    if [[ -z "$pids" ]]; then
+        echo "nepi_connect service is not running"
+        return 0
+    fi
+    echo "Stopping nepi_connect service (pid ${pids//$'\n'/ }) and the stream it started"
+    kill -TERM $pids 2>/dev/null
+    while pgrep -f "bash ${service}" >/dev/null 2>&1; do
+        sleep 1
+        waited=$((waited + 1))
+        if [[ $waited -ge 15 ]]; then
+            echo "nepi_connect service did not stop within 15 s -- see /tmp/nepi_connect_service.log"
+            return 1
+        fi
+    done
+    echo "nepi_connect service stopped"
+}
+export -f nepi_connect_stop

@@ -161,6 +161,12 @@ class AutoMoveImgPub:
     show_targets_enabled = True
     show_obstacles_enabled = True
     show_crosshair_enabled = True
+    # Not on the status message yet, so these stay off until they are wired up.
+    show_attitude_enabled = False
+    show_move_enabled = False
+
+    draw_attitude = False
+    draw_crosshair = False
 
     has_click = False
     click_x_ratio = 0.0
@@ -795,50 +801,50 @@ class AutoMoveImgPub:
             info_dict['process_time'] = (nepi_utils.get_time() - start_time)
 
 
-def overlay_attitude(cv2_img, x_px, y_px, color_rgb=(0, 255, 0), size_ratio = 0.5, thickness_ratio = 0.5, size=None, thickness=None,  text_list = [], text_ratio = 0.5):
-    """Draws a crosshair on an image at a given (x_px, y_px) position."""
-    # Draw vertical line
-    # if size is None or thickness is None:
-    #     size, thickness  = get_optimal_font_dims(cv2_img,font_scale = 2e-3, thickness_scale = 1.5e-3)
-    shape = cv2_img.shape
-    h=shape[0]
-    w=shape[1]  
-    hw_min = min(h,w)
-    hw_size = math.ceil((0.05 * hw_min))  
-    hw_thickness = math.ceil((0.004 * hw_min))
-    if size is None:
-       size = hw_size
+    def overlay_attitude(self, cv2_img, x_px, y_px, color_rgb=(0, 255, 0), size_ratio = 0.5, thickness_ratio = 0.5, size=None, thickness=None,  text_list = [], text_ratio = 0.5):
+        """Draws a crosshair on an image at a given (x_px, y_px) position."""
+        # Draw vertical line
+        # if size is None or thickness is None:
+        #     size, thickness  = get_optimal_font_dims(cv2_img,font_scale = 2e-3, thickness_scale = 1.5e-3)
+        shape = cv2_img.shape
+        h=shape[0]
+        w=shape[1]  
+        hw_min = min(h,w)
+        hw_size = math.ceil((0.05 * hw_min))  
+        hw_thickness = math.ceil((0.004 * hw_min))
+        if size is None:
+           size = hw_size
 
-    if thickness is None:
-       thickness = hw_thickness
-    size_ratio = nepi_utils.check_ratio(size_ratio)
-    size = int(size / 3 + size * (size_ratio * 1.5) )
-    thickness = int(thickness * (thickness_ratio * 2))
-    if size < 5:
-       size = 5
-    if thickness < 1:
-       thickness = 1 
+        if thickness is None:
+           thickness = hw_thickness
+        size_ratio = nepi_utils.check_ratio(size_ratio)
+        size = int(size / 3 + size * (size_ratio * 1.5) )
+        thickness = int(thickness * (thickness_ratio * 2))
+        if size < 5:
+           size = 5
+        if thickness < 1:
+           thickness = 1 
     
-    # Draw vetical lines
-    color_bgr = (color_rgb[2],color_rgb[1],color_rgb[0])
-    cv2.line(cv2_img, (x_px, y_px + size), (x_px, y_px + 2 * size), color_bgr, thickness)
-    cv2.line(cv2_img, (x_px, y_px - size), (x_px, y_px - 2 * size), color_bgr, thickness)
-    # Draw horizontal lines
-    cv2.line(cv2_img, (x_px + size, y_px), (x_px + 2 * size, y_px), color_bgr, thickness)
-    cv2.line(cv2_img, (x_px - size, y_px), (x_px - 2 * size, y_px), color_bgr, thickness)
-    # Draw circle
-    center_coordinates = (x_px, y_px)
-    radius = int(size + size/2)
-    cv2.circle(cv2_img, center_coordinates, radius, color_bgr, thickness)
+        # Draw vetical lines
+        color_bgr = (color_rgb[2],color_rgb[1],color_rgb[0])
+        cv2.line(cv2_img, (x_px, y_px + size), (x_px, y_px + 2 * size), color_bgr, thickness)
+        cv2.line(cv2_img, (x_px, y_px - size), (x_px, y_px - 2 * size), color_bgr, thickness)
+        # Draw horizontal lines
+        cv2.line(cv2_img, (x_px + size, y_px), (x_px + 2 * size, y_px), color_bgr, thickness)
+        cv2.line(cv2_img, (x_px - size, y_px), (x_px - 2 * size, y_px), color_bgr, thickness)
+        # Draw circle
+        center_coordinates = (x_px, y_px)
+        radius = int(size + size/2)
+        cv2.circle(cv2_img, center_coordinates, radius, color_bgr, thickness)
 
-    if len(text_list) > 0:
-        x_px = x_px
-        y_padding = 0 # math.ceil((0.02 * h) + size ) 
-        y_px = y_px + y_padding
-        x_padding = math.ceil((0.02 * w) + size ) 
-        x_px = x_px + x_padding
-        cv2_img  =  nepi_img.overlay_text_list(cv2_img, text_list, x_px = x_px , y_px = y_px, color_rgb = color_rgb, size_ratio = text_ratio / 3)
-    return cv2_img
+        if len(text_list) > 0:
+            x_px = x_px
+            y_padding = 0 # math.ceil((0.02 * h) + size ) 
+            y_px = y_px + y_padding
+            x_padding = math.ceil((0.02 * w) + size ) 
+            x_px = x_px + x_padding
+            cv2_img  =  nepi_img.overlay_text_list(cv2_img, text_list, x_px = x_px , y_px = y_px, color_rgb = color_rgb, size_ratio = text_ratio / 3)
+        return cv2_img
 
     def processOverlayImage(self, cv2_img, result_dict, timestamp = None, frame_id = ''):
         img_if = self.img_node_dict.get('img_if', None) 

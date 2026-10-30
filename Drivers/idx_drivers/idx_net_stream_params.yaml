@@ -1,7 +1,7 @@
 driver:
   pkg_name: IDX_NET_STREAM
   display_name: Network Stream Camera
-  description: Driver package for network video streams (RTSP or HTTP) received as NEPI cameras
+  description: Driver package for network video streams (RTSP, HTTP or FastMJPG) received as NEPI cameras
   type: IDX
   group_id: None
   NODE_DICT:
@@ -23,9 +23,19 @@ driver:
       #   rtsps://host[:port]/path    RTSP over TLS (default port 322)
       #   http://host[:port]/path     HTTP stream, e.g. MJPEG (default port 80)
       #   https://host[:port]/path    HTTP stream over TLS (default port 443)
+      #   fastmjpg://sender[:port]    FastMJPG UDP video, which the sender's FastMJPG
+      #                               `send` output pushes to this NEPI device. sender
+      #                               is the sender's IPv4 address (0.0.0.0 accepts any
+      #                               sender); port is NEPI's own UDP port, the send
+      #                               command's REMOTE_PORT (default 5600). Each stream
+      #                               needs its own port. Add ?max_packet=N&max_jpeg=N
+      #                               if the send command's MAX_PACKET_LENGTH and
+      #                               MAX_JPEG_LENGTH differ from 1400 and 1000000.
       # Credentials may be given as scheme://user:pass@host/...; the password is
-      # never logged or published. Plain UDP and raw RTP/SDP are not supported.
-      # Example: rtsp://192.168.2.2:8554/cam1, http://192.168.2.2:8080/stream
+      # never logged or published. Other plain UDP formats and raw RTP/SDP are not
+      # supported.
+      # Example: rtsp://192.168.2.2:8554/cam1, http://192.168.2.2:8080/stream,
+      #          fastmjpg://192.168.68.22:5600
       # Enter none to clear the list.
       stream_urls:
         type: String

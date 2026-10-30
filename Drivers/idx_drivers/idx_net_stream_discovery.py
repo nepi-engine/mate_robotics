@@ -187,6 +187,7 @@ class NetStreamCamDiscovery:
       return []
     stream_urls = []
     device_names = []
+    local_ports = []
     for entry in urls_value.split(','):
       url = entry.strip()
       if url == '' or url in stream_urls:
@@ -202,8 +203,18 @@ class NetStreamCamDiscovery:
                              ": same host, port and path as an earlier entry",
                              throttle_s = self.LOG_THROTTLE_SEC, throttle_n = False)
         continue
+      # A stream pushed to NEPI (fastmjpg://) holds a local UDP port, which a
+      # second such stream could not open
+      local_port = self.driver_class.get_local_port(url)
+      if local_port is not None and local_port in local_ports:
+        self.msg_if.pub_warn("Skipping stream URL " + self.driver_class.get_safe_url(url) +
+                             ": UDP port " + str(local_port) + " is already used by an earlier entry",
+                             throttle_s = self.LOG_THROTTLE_SEC, throttle_n = False)
+        continue
       stream_urls.append(url)
       device_names.append(device_name)
+      if local_port is not None:
+        local_ports.append(local_port)
     return stream_urls
 
 
