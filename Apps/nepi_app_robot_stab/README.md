@@ -23,8 +23,9 @@ bash nepi_disp.sh
 The script uses the same SSH destinations as the computer's `sshn` alias for
 the NEPI container and `h` alias for the onboard Pi. It copies the two Python files to NEPI,
 starts the NEPI processor, opens the computer viewer, then starts the onboard
-camera. It also opens a Tkinter window on the computer with x(t), y(t), and
-the parametric path (x(t), y(t)), all in pixels over the most recent 60 seconds.
+camera. It also opens a Matplotlib window in Tkinter, styled like the ROV PID
+plots, with x(t), y(t), and the parametric path (x(t), y(t)) in pixels over the
+most recent 10 seconds.
 NEPI sends displacement samples to computer UDP port 5601; the camera viewer
 continues to use port 5600. Press Ctrl+C to stop the processes. Stop the earlier one-off Python UDP
 relay, computer viewer, and onboard sender before running it so each camera

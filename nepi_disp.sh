@@ -74,8 +74,8 @@ if [[ ! -f "$SCRIPTS_DIR/optical_flow.py" || ! -f "$SCRIPTS_DIR/live_udp_stabili
     printf 'Missing NEPI stabilization scripts in %s\n' "$SCRIPTS_DIR" >&2
     exit 1
 fi
-python3 -c 'import tkinter as tk; root = tk.Tk(); root.withdraw(); root.destroy()' || {
-    printf 'Tkinter needs a graphical desktop on this computer.\n' >&2
+python3 -c 'import tkinter as tk; from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg; root = tk.Tk(); root.withdraw(); root.destroy()' || {
+    printf 'Matplotlib and Tkinter need to be installed with a graphical desktop on this computer.\n' >&2
     exit 1
 }
 if [[ -n "$HAILO_HEF" ]]; then
