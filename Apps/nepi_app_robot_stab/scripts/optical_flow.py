@@ -23,6 +23,7 @@ class OpticalFlow:
         min_inlier_ratio=0.35,
         max_jump_px=75.0,
         track_incrementally=False,
+        feature_extractor=None,
     ):
         """Create a tracker.
 
@@ -44,8 +45,12 @@ class OpticalFlow:
         self.min_inlier_ratio = float(min_inlier_ratio)
         self.max_jump_px = max_jump_px
         self.track_incrementally = track_incrementally
-        self.orb = cv2.ORB.create(nfeatures=nfeatures, fastThreshold=12)
-        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        self.feature_extractor = feature_extractor
+        self.orb = None if feature_extractor is not None else cv2.ORB.create(
+            nfeatures=nfeatures, fastThreshold=12
+        )
+        norm = cv2.NORM_L2 if feature_extractor is not None else cv2.NORM_HAMMING
+        self.matcher = cv2.BFMatcher(norm, crossCheck=True)
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
         self.dx = 0.0
@@ -53,6 +58,7 @@ class OpticalFlow:
         self._position = np.zeros(2, dtype=float)
         self._last_raw = None
         self.last_inlier_count = 0
+        self.last_feature_count = 0
         self.set_reference(ref_frame)
 
     @staticmethod
@@ -66,12 +72,17 @@ class OpticalFlow:
         reference = self.preprocess(frame)
         self._set_reference_processed(reference)
 
-    def _set_reference_processed(self, reference):
+    def _set_reference_processed(self, reference, features=None):
         """Set a reference that has already been preprocessed."""
         self.reference_shape = reference.shape
-        self.ref_keypoints, self.ref_descriptors = self.orb.detectAndCompute(
-            reference, None
-        )
+        if features is None:
+            features = self._extract(reference)
+        self.ref_keypoints, self.ref_descriptors = features
+
+    def _extract(self, image):
+        if self.feature_extractor is not None:
+            return self.feature_extractor.extract(image)
+        return self.orb.detectAndCompute(image, None)
 
     def compute_displacement_px(self, current_frame):
         """Estimate and smooth the current displacement from the reference.
@@ -80,13 +91,15 @@ class OpticalFlow:
         consistent matches, the previous stable value is returned unchanged.
         """
         current = self.preprocess(current_frame)
+        self.last_inlier_count = 0
         if current.shape != self.reference_shape:
             raise ValueError(
                 "Images must have the same dimensions; got "
                 f"{self.reference_shape} and {current.shape}."
             )
 
-        cur_keypoints, cur_descriptors = self.orb.detectAndCompute(current, None)
+        cur_keypoints, cur_descriptors = self._extract(current)
+        self.last_feature_count = len(cur_keypoints)
         if self.ref_descriptors is None or cur_descriptors is None:
             return self.dx, self.dy
 
@@ -135,7 +148,7 @@ class OpticalFlow:
         if self.track_incrementally:
             self._position += raw
             target = self._position
-            self._set_reference_processed(current)
+            self._set_reference_processed(current, (cur_keypoints, cur_descriptors))
         else:
             target = raw
 
