@@ -23,7 +23,9 @@
 # order. TestLoopback starts both sides' threads in real time.
 
 import json
+import math
 import os
+import random
 import socket
 import sys
 import threading
@@ -39,7 +41,8 @@ sys.path.insert(0, os.path.join(HERE, '..', '..', 'Drivers', 'rbx_drivers'))
 
 def stubModules():
     names = ['nepi_sdk', 'nepi_sdk.nepi_sdk', 'nepi_sdk.nepi_nav', 'nepi_sdk.nepi_utils', 'nepi_sdk.nepi_drvs',
-             'nepi_sdk.nepi_system', 'nepi_sdk.nepi_controls', 'nepi_api', 'nepi_api.device_if_rbx', 'nepi_api.messages_if',
+             'nepi_sdk.nepi_system', 'nepi_sdk.nepi_controls', 'nepi_api', 'nepi_api.device_if_rbx',
+             'nepi_api.device_if_svx', 'nepi_api.messages_if',
              'std_msgs', 'std_msgs.msg', 'nepi_interfaces', 'nepi_interfaces.msg']
     for name in names:
         sys.modules[name] = types.ModuleType(name)
@@ -49,6 +52,7 @@ def stubModules():
             setattr(sys.modules[parent], child, sys.modules[name])
     # The names the driver files import from them
     sys.modules['nepi_api.device_if_rbx'].RBXRobotIF = None
+    sys.modules['nepi_api.device_if_svx'].SVXActuatorIF = None
     sys.modules['nepi_api.messages_if'].MsgIF = None
     sys.modules['std_msgs.msg'].String = None
     sys.modules['std_msgs.msg'].Empty = None
@@ -59,15 +63,52 @@ stubModules()
 import nepi_link
 import rbx_mate_rov_link_node
 import rbx_mate_rov_link_discovery
+import rbx_mate_rov_link_servo_node
 
 MateRovLink = rbx_mate_rov_link_node.MateRovLink
 MateRovLinkDiscovery = rbx_mate_rov_link_discovery.MateRovLinkDiscovery
+ImuMount = rbx_mate_rov_link_node.ImuMount
 
 ROV = '127.0.0.1' # Both the ROV Pi's address and NEPI_LAN_IP here
 OTHER = '127.0.0.2' # A sender that is not the ROV
 WALL_EPOCH = 1792200000.0
 SURGE_0_1 = 5706 # stick_value(0.1)
 BENCH_LINE = '$TNCTL,0,0,0,0,100,100,100,100,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,*FF'
+# Two claw servos on the Pi: D-pad up/down and the A button
+CLAW_SERVOS = dict(NEPI_SERVO_1_NAME = 'claw_pitch', NEPI_SERVO_1_INPUT = 'ABS_HAT0Y',
+                   NEPI_SERVO_2_NAME = 'claw_grip', NEPI_SERVO_2_INPUT = 'BTN_SOUTH')
+HAT0Y_SLOT = nepi_link.GAMEPAD_SLOTS['ABS_HAT0Y']
+SOUTH_SLOT = nepi_link.GAMEPAD_SLOTS['BTN_SOUTH']
+
+
+def teensyAngles(mount, roll_deg, pitch_deg, yaw_deg):
+    # What the team's sketch prints for a ROV at this orientation with its
+    # board mounted this way: the board's rotation as a quaternion, through
+    # new_ctl.ino:285-287 verbatim, printed to 2 decimals
+    rov = mount.rotationFromEuler(roll_deg, pitch_deg, yaw_deg)
+    m = [[sum(rov[i][k] * mount.matrix[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+    trace = m[0][0] + m[1][1] + m[2][2]
+    if trace > 0:
+        s = math.sqrt(trace + 1.0) * 2
+        [qr, qi, qj, qk] = [0.25 * s, (m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s]
+    elif m[0][0] > m[1][1] and m[0][0] > m[2][2]:
+        s = math.sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2
+        [qr, qi, qj, qk] = [(m[2][1] - m[1][2]) / s, 0.25 * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s]
+    elif m[1][1] > m[2][2]:
+        s = math.sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2
+        [qr, qi, qj, qk] = [(m[0][2] - m[2][0]) / s, (m[0][1] + m[1][0]) / s, 0.25 * s, (m[1][2] + m[2][1]) / s]
+    else:
+        s = math.sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2
+        [qr, qi, qj, qk] = [(m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25 * s]
+    [sqr, sqi, sqj, sqk] = [qr * qr, qi * qi, qj * qj, qk * qk]
+    yaw = math.atan2(2.0 * (qi * qj + qk * qr), (sqi - sqj - sqk + sqr))
+    pitch = math.asin(max(-1.0, min(1.0, -2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr))))
+    roll = math.atan2(2.0 * (qj * qk + qi * qr), (-sqi - sqj + sqk + sqr))
+    return [round(math.degrees(angle), 2) for angle in (roll, pitch, yaw)]
+
+
+def angleError(a_deg, b_deg):
+    return abs((a_deg - b_deg + 180.0) % 360.0 - 180.0)
 
 
 class FakeClock(object):
@@ -104,10 +145,13 @@ def waitFor(predicate, timeout_sec = 1.0):
         time.sleep(0.002)
     return predicate()
 
-def pilot(rb = 0, ly = 0):
+def pilot(rb = 0, ly = 0, slots = None):
     inputs = [0] * 18
     inputs[nepi_link.RB_SLOT] = rb
     inputs[nepi_link.LY_SLOT] = ly
+    if slots is not None:
+        for [slot, value] in slots.items():
+            inputs[slot] = value
     return inputs
 
 def statusBytes(**changes):
@@ -182,7 +226,7 @@ class Bench(object):
         if not waitFor(lambda: self.link.status_seq == seq or self.link.status_bad > bad):
             raise AssertionError('status ' + str(seq) + ' never reached the link')
 
-    def step(self, command = None, rb = 0, status = True, ly = 0):
+    def step(self, command = None, rb = 0, status = True, ly = 0, slots = None):
         if command is not None:
             self.link.set_teleop_velocity(*command)
         demand = None
@@ -191,7 +235,7 @@ class Bench(object):
             [datagram, sender] = self.demand_rx.recvfrom(65536)
             demand = json.loads(datagram.decode('utf-8'))
             self.pi.handle_demand(datagram, sender[0])
-        self.merged = self.pi.merge_inputs(pilot(rb = rb, ly = ly))
+        self.merged = self.pi.merge_inputs(pilot(rb = rb, ly = ly, slots = slots))
         if status:
             self.sendStatus(self.pi.nextStatusDatagram())
         self.clock.advance(0.1)
@@ -494,7 +538,8 @@ class TestNavPose(unittest.TestCase):
         self.tn_age_ms = -1
         link = types.SimpleNamespace(get_tn = lambda: [self.tn, self.tn_age_ms])
         self.node = types.SimpleNamespace(link = link, TN_MAX_AGE_MS = rbx_mate_rov_link_node.MateRovLinkNode.TN_MAX_AGE_MS,
-                                          navpose_dict = dict(has_depth = False, has_orientation = False))
+                                          navpose_dict = dict(has_depth = False, has_orientation = False),
+                                          imu_mount = ImuMount())
 
     def navpose(self):
         return rbx_mate_rov_link_node.MateRovLinkNode.getNavPoseCb(self.node)
@@ -502,7 +547,8 @@ class TestNavPose(unittest.TestCase):
     def test_none_until_the_first_fresh_telemetry(self):
         # None makes NPXDeviceIF wait instead of fixing has_depth False for good
         self.assertIsNone(self.navpose())
-        self.tn = dict(depth_m = '0.03', yaw_deg = '0.00', pitch_deg = '0.00', roll_deg = '0.00')
+        self.tn = dict(depth_m = '0.03', depth_m_s = '0.00', yaw_deg = '0.00', pitch_deg = '0.00', roll_deg = '0.00',
+                       yaw_deg_s = '0.00', pitch_deg_s = '0.00', roll_deg_s = '0.00')
         self.tn_age_ms = self.node.TN_MAX_AGE_MS + 1
         self.assertIsNone(self.navpose())
         self.tn_age_ms = 100
@@ -514,6 +560,79 @@ class TestNavPose(unittest.TestCase):
         # Stale after that: the last navpose, not None
         self.tn_age_ms = self.node.TN_MAX_AGE_MS + 1
         self.assertIs(self.navpose(), navpose)
+
+    def test_depth_rate_frame_and_the_flat_mount(self):
+        # The flat mount passes the angles through and reads the rate columns
+        # as gyro X, Y, Z, so the sketch's yaw_deg_s lands on roll
+        self.tn = dict(depth_m = 1.25, depth_m_s = -0.12, yaw_deg = 40.0, pitch_deg = -3.0, roll_deg = 2.0,
+                       yaw_deg_s = 10.0, pitch_deg_s = 2.0, roll_deg_s = 3.0)
+        self.tn_age_ms = 100
+        navpose = self.navpose()
+        self.assertEqual(navpose['frame_depth'], 'DEPTH')
+        self.assertEqual(navpose['depth_m_per_sec'], -0.12)
+        self.assertEqual((navpose['roll_deg'], navpose['pitch_deg'], navpose['yaw_deg']), (2.0, -3.0, 40.0))
+        self.assertEqual((navpose['roll_deg_per_sec'], navpose['pitch_deg_per_sec'], navpose['yaw_deg_per_sec']),
+                         (10.0, 2.0, 3.0))
+
+    def test_side_mount_turns_orientation_and_rates_into_the_rov_frame(self):
+        # The team's mount (2026-10-26): X vertical. Y left is assumed here.
+        self.node.imu_mount = ImuMount('X_UP_Y_LEFT')
+        [roll, pitch, yaw] = teensyAngles(self.node.imu_mount, 2.0, -3.0, 40.0)
+        self.tn = dict(depth_m = 1.25, depth_m_s = 0.0, yaw_deg = yaw, pitch_deg = pitch, roll_deg = roll,
+                       yaw_deg_s = 10.0, pitch_deg_s = 2.0, roll_deg_s = 3.0)
+        self.tn_age_ms = 100
+        navpose = self.navpose()
+        self.assertLess(angleError(navpose['roll_deg'], 2.0), 0.02)
+        self.assertLess(angleError(navpose['pitch_deg'], -3.0), 0.02)
+        self.assertLess(angleError(navpose['yaw_deg'], 40.0), 0.02)
+        # Gyro X is up (yaw), Y is left (pitch), and Z = X x Y points back, so roll is -Z
+        self.assertEqual((navpose['roll_deg_per_sec'], navpose['pitch_deg_per_sec'], navpose['yaw_deg_per_sec']),
+                         (-3.0, 2.0, 10.0))
+
+
+class TestImuMount(unittest.TestCase):
+
+    def test_24_right_handed_mounts_flat_first(self):
+        options = rbx_mate_rov_link_node.IMU_MOUNT_OPTIONS
+        self.assertEqual(len(options), 24)
+        self.assertEqual(len(set(options)), 24)
+        self.assertEqual(options[0], rbx_mate_rov_link_node.IMU_MOUNT_FLAT)
+        for name in options:
+            m = ImuMount(name).matrix
+            det = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                   + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+            self.assertEqual(det, 1, name)
+
+    def test_unknown_mount_is_refused(self):
+        for name in ['', 'X_UP_Y_UP', 'X_UP_Y_DOWN', 'x_forward_y_left', None]:
+            with self.assertRaises(ValueError):
+                ImuMount(name)
+
+    def test_flat_passes_through_unchanged(self):
+        mount = ImuMount()
+        self.assertEqual(mount.orientation_to_rov(1.5, -2.25, 170.0), [1.5, -2.25, 170.0])
+        self.assertEqual(mount.rates_to_rov(1.0, 2.0, 3.0), [1.0, 2.0, 3.0])
+
+    def test_every_mount_recovers_the_rov_from_the_printed_angles(self):
+        # Any heading, tilts within 5 deg, through the sketch's own conversion
+        # and its 2-decimal print
+        rng = random.Random(1)
+        for name in rbx_mate_rov_link_node.IMU_MOUNT_OPTIONS:
+            mount = ImuMount(name)
+            for _ in range(200):
+                pose = [rng.uniform(-5, 5), rng.uniform(-5, 5), rng.uniform(-180, 180)]
+                result = mount.orientation_to_rov(*teensyAngles(mount, *pose))
+                for (got, want) in zip(result, pose):
+                    self.assertLess(angleError(got, want), 0.02, (name, pose, result))
+
+    def test_side_mount_yaw_is_unusable_unconverted(self):
+        # Why the mount exists: on its side, the sketch's yaw follows a half
+        # degree of tilt, not the heading
+        mount = ImuMount('X_UP_Y_LEFT')
+        [roll, pitch, yaw] = teensyAngles(mount, 0.5, 0.0, 30.0)
+        self.assertAlmostEqual(abs(pitch), 89.5, places = 1)
+        self.assertGreater(angleError(yaw, 30.0), 45.0)
+        self.assertLess(angleError(mount.orientation_to_rov(roll, pitch, yaw)[2], 30.0), 0.02)
 
 
 class TestStatusValidation(unittest.TestCase):
@@ -557,11 +676,25 @@ class TestStatusValidation(unittest.TestCase):
         self.assertDropped(statusBytes(tn = [1]))
         self.assertDropped(statusBytes(tn = dict(depth_m = '1', yaw_deg = 0, pitch_deg = 0, roll_deg = 0)))
         self.assertDropped(statusBytes(tn = dict(depth_m = 0, yaw_deg = 0, pitch_deg = 0)))
+        self.assertDropped(statusBytes(tn = dict(depth_m = 0, depth_m_s = 0, yaw_deg = 0, pitch_deg = 0, roll_deg = 0,
+                                                 yaw_deg_s = 0, pitch_deg_s = 0)))
         message = json.loads(statusBytes().decode('utf-8'))
         del message['tn']
         self.assertDropped(json.dumps(message).encode('utf-8'))
         self.assertDropped(statusBytes(pad = 'x' * 1200))
         self.assertDropped(statusBytes(), OTHER)
+        self.assertDropped(statusBytes(servos = [1]))
+        self.assertDropped(statusBytes(servos = dict(claw = 1)))
+        self.assertDropped(statusBytes(servos = dict(Claw = False)))
+        self.assertDropped(statusBytes(servos = dict(a = False, b = False, c = False, d = False, e = False)))
+
+    def test_a_status_without_servos_lists_none(self):
+        [accepted, msg] = self.link.handle_status(statusBytes(), ROV)
+        self.assertTrue(accepted, msg)
+        self.assertEqual(self.link.get_health()['servos'], dict())
+        self.clock.advance(0.1)
+        self.assertTrue(self.link.handle_status(statusBytes(seq = 1, servos = dict(claw = True)), ROV)[0])
+        self.assertEqual(self.link.get_health()['servos'], dict(claw = dict(value = 0.0, pilot = True)))
 
     def test_status_seq_order_and_restart(self):
         self.assertTrue(self.link.handle_status(statusBytes(seq = 5), ROV)[0])
@@ -572,6 +705,195 @@ class TestStatusValidation(unittest.TestCase):
         # More than 1 s after the last accepted one, a restarted Pi's seq 0 is accepted
         self.clock.advance(1.01)
         self.assertTrue(self.link.handle_status(statusBytes(seq = 0), ROV)[0])
+
+
+class TestServos(unittest.TestCase):
+
+    def setUp(self):
+        self.bench = Bench(NEPI_SURGE_SIGN = 1, NEPI_SWAY_SIGN = 1, NEPI_YAW_SIGN = 1, **CLAW_SERVOS)
+
+    def tearDown(self):
+        self.bench.close()
+
+    def servoInputs(self):
+        return self.bench.merged[HAT0Y_SLOT], self.bench.merged[SOUTH_SLOT]
+
+    def test_the_pi_lists_its_servos(self):
+        b = self.bench
+        self.assertEqual(b.link.get_health()['servos'], dict())
+        b.steps(3)
+        self.assertEqual(b.link.get_health()['servos'], dict(claw_pitch = dict(value = 0.0, pilot = False),
+                                                             claw_grip = dict(value = 0.0, pilot = False)))
+
+    def test_pilot_mode_refuses_servo_values(self):
+        b = self.bench
+        b.steps(3)
+        [success, msg] = b.link.set_servo('claw_pitch', 1.0)
+        self.assertFalse(success)
+        self.assertIn('NEPI does not have the ROV', msg)
+        demand = b.step(slots = {HAT0Y_SLOT: -1})
+        self.assertEqual(demand['servos'], dict())
+        # The pilot's own D-pad passes straight through
+        self.assertEqual(self.servoInputs(), (-1, 0))
+
+    def test_nepi_control_moves_and_holds_the_servos(self):
+        b = self.bench
+        b.steps(3)
+        b.handOver()
+        self.assertTrue(b.link.set_servo('claw_pitch', -1.0)[0])
+        self.assertTrue(b.link.set_servo('claw_grip', 1.0)[0])
+        demand = b.step()
+        self.assertEqual(demand['servos'], dict(claw_pitch = -1.0, claw_grip = 1.0))
+        self.assertEqual(self.servoInputs(), (-1, 1))
+        # Unlike a teleop command, a servo value never goes stale
+        demands = b.steps(10)
+        self.assertEqual(demands[-1]['servos'], dict(claw_pitch = -1.0, claw_grip = 1.0))
+        self.assertEqual(self.servoInputs(), (-1, 1))
+        self.assertEqual(b.link.get_health()['servos']['claw_pitch'], dict(value = -1.0, pilot = False))
+        self.assertEqual(b.pi.build_status()['demand_bad'], 0)
+
+    def test_values_are_clamped_and_rounded(self):
+        b = self.bench
+        b.steps(3)
+        b.handOver()
+        self.assertTrue(b.link.set_servo('claw_pitch', 3.0)[0])
+        self.assertTrue(b.link.set_servo('claw_grip', 0.123456789)[0])
+        self.assertEqual(b.step()['servos'], dict(claw_pitch = 1.0, claw_grip = 0.1235))
+        for bad in [float('nan'), float('inf'), True, '0.5', None]:
+            self.assertFalse(b.link.set_servo('claw_pitch', bad)[0])
+        [success, msg] = b.link.set_servo('wrist', 0.5)
+        self.assertFalse(success)
+        self.assertIn('no servo by that name', msg)
+        self.assertEqual(b.link.servo_cmd, dict(claw_pitch = 1.0, claw_grip = 0.123456789))
+
+    def test_pilot_wins_that_input_only(self):
+        b = self.bench
+        b.steps(3)
+        b.handOver()
+        b.link.set_servo('claw_pitch', 1.0)
+        b.link.set_servo('claw_grip', 1.0)
+        b.step((0.1, 0.0, 0.0, 0.0), slots = {HAT0Y_SLOT: -1})
+        self.assertEqual(self.servoInputs(), (-1, 1))
+        self.assertEqual(b.merged[nepi_link.LY_SLOT], SURGE_0_1)
+        self.assertTrue(b.link.is_nepi_control())
+        self.assertTrue(b.link.get_health()['servos']['claw_pitch']['pilot'])
+        # Released, NEPI's value is back
+        b.step()
+        self.assertEqual(self.servoInputs(), (1, 1))
+        self.assertFalse(b.link.get_health()['servos']['claw_pitch']['pilot'])
+
+    def test_handing_back_drops_the_values(self):
+        b = self.bench
+        b.steps(3)
+        b.handOver()
+        b.link.set_servo('claw_pitch', 1.0)
+        b.step()
+        self.assertEqual(self.servoInputs(), (1, 0))
+        b.step(rb = 1)
+        self.assertFalse(b.link.is_nepi_control())
+        self.assertEqual(b.step()['servos'], dict())
+        self.assertEqual(self.servoInputs(), (0, 0))
+        self.assertEqual(b.link.get_health()['servos']['claw_pitch']['value'], 0.0)
+        # A new handover starts neutral
+        b.handOver()
+        self.assertEqual(b.step()['servos'], dict())
+        self.assertEqual(self.servoInputs(), (0, 0))
+
+    def test_release_to_pilot_drops_the_values_and_stop_keeps_them(self):
+        b = self.bench
+        b.steps(3)
+        b.handOver()
+        b.link.set_servo('claw_pitch', 1.0)
+        b.link.go_stop()
+        self.assertEqual(b.step()['servos'], dict(claw_pitch = 1.0))
+        b.link.release_to_pilot()
+        demand = b.step()
+        self.assertEqual((demand['active'], demand['servos']), (False, dict()))
+        self.assertEqual(b.link.servo_cmd, dict())
+
+
+class TestServoDegrees(unittest.TestCase):
+
+    def test_each_half_scales_on_its_own(self):
+        to_value = rbx_mate_rov_link_servo_node.deg_to_value
+        to_deg = rbx_mate_rov_link_servo_node.value_to_deg
+        self.assertEqual([to_value(d, -90.0, 90.0) for d in [-90.0, -45.0, 0.0, 45.0, 90.0, 120.0]],
+                         [-1.0, -0.5, 0.0, 0.5, 1.0, 1.0])
+        # An Axon MAX MK2 in servo mode can reach about 175 deg each way
+        self.assertEqual([to_value(d, -175.0, 50.0) for d in [-175.0, -87.5, 0.0, 25.0, 50.0]],
+                         [-1.0, -0.5, 0.0, 0.5, 1.0])
+        for value in [-1.0, -0.3, 0.0, 0.7, 1.0]:
+            self.assertAlmostEqual(to_value(to_deg(value, -175.0, 50.0), -175.0, 50.0), value)
+        self.assertEqual(to_deg(-2.0, -175.0, 50.0), -175.0)
+
+
+class FakeMessage(object):
+
+    def __init__(self, data = None):
+        self.data = data
+
+
+class TestServoNodeGate(unittest.TestCase):
+    """The servo node's own NEPI control check, on a node built without ROS."""
+
+    def setUp(self):
+        self.now = 1000.0
+        self.published = []
+        self.warnings = []
+        node_module = rbx_mate_rov_link_servo_node
+        self.saved = (node_module.String, getattr(node_module.nepi_utils, 'get_time', None))
+        node_module.String = FakeMessage
+        node_module.nepi_utils.get_time = lambda: self.now
+        node = node_module.MateRovLinkServoNode.__new__(node_module.MateRovLinkServoNode)
+        node.servo_name = 'claw_pitch'
+        node.link_lock = threading.Lock()
+        node.link_status_time = None
+        node.nepi_control = False
+        node.servo_value = 0.0
+        node.pilot_holds = False
+        node.last_refused_warn = None
+        node.limits_dict = dict(min_hardstop_deg = -175.0, max_hardstop_deg = 50.0)
+        node.set_servo_pub = types.SimpleNamespace(publish = lambda msg: self.published.append(json.loads(msg.data)))
+        node.msg_if = types.SimpleNamespace(pub_warn = lambda msg, **kwargs: self.warnings.append(msg))
+        self.node = node
+
+    def tearDown(self):
+        rbx_mate_rov_link_servo_node.String = self.saved[0]
+        rbx_mate_rov_link_servo_node.nepi_utils.get_time = self.saved[1]
+
+    def linkStatus(self, nepi_control, servos = None):
+        health = dict(link_up = True, nepi_control = nepi_control, servos = dict())
+        if servos is not None:
+            health['servos'] = servos
+        self.node.linkStatusCb(FakeMessage(json.dumps(health)))
+
+    def test_refused_until_nepi_has_the_rov(self):
+        node = self.node
+        node.gotoPosition(25.0) # No link_status yet
+        self.linkStatus(False)
+        node.gotoPosition(25.0)
+        self.assertEqual(self.published, [])
+        self.assertEqual(len(self.warnings), 1) # At most once per REFUSED_WARN_SEC
+        self.assertIn('NEPI does not have the ROV', self.warnings[0])
+        self.linkStatus(True)
+        node.gotoPosition(25.0)
+        node.gotoPosition(-87.5)
+        self.assertEqual(self.published, [dict(name = 'claw_pitch', value = 0.5), dict(name = 'claw_pitch', value = -0.5)])
+
+    def test_stale_link_status_counts_as_pilot_mode(self):
+        self.linkStatus(True)
+        self.now += self.node.LINK_STATUS_TIMEOUT_SEC + 0.1
+        self.node.gotoPosition(25.0)
+        self.assertEqual(self.published, [])
+
+    def test_position_is_the_value_nepi_sends(self):
+        node = self.node
+        self.assertEqual(node.getPosition(), 0.0)
+        self.linkStatus(True, dict(claw_pitch = dict(value = -0.5, pilot = True)))
+        self.assertEqual((node.getPosition(), node.pilot_holds), (-87.5, True))
+        # Dropped when NEPI control ends
+        self.linkStatus(False, dict(claw_pitch = dict(value = 0.0, pilot = False)))
+        self.assertEqual(node.getPosition(), 0.0)
 
 
 class TestLoopback(unittest.TestCase):
@@ -715,6 +1037,14 @@ class TestDiscoveryProbe(unittest.TestCase):
     def test_silence_is_not_found(self):
         self.assertFalse(self.probe()[0])
         self.assertPortFree()
+
+    def test_the_probe_reads_the_servo_names(self):
+        servos = dict(claw_pitch = False, claw_grip = True, Bad = False)
+        self.sender = FakeStatusSender(ROV, self.port, statusBytes(servos = servos))
+        self.assertEqual(self.discovery.probeStatus(ROV, str(self.port)), (True, ['claw_grip', 'claw_pitch']))
+        self.sender.stop()
+        self.sender = FakeStatusSender(ROV, self.port, statusBytes())
+        self.assertEqual(self.discovery.probeStatus(ROV, str(self.port)), (True, []))
 
     def test_a_port_held_by_a_running_link_is_never_probed(self):
         link = MateRovLink(ROV, self.port, freeUdpPort(), log = lambda msg: None)

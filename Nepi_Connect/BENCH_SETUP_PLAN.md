@@ -26,6 +26,17 @@ Build a working copy of the Coral Crusaders' ROV control system on the bench, us
   - one faces down toward the back claw.
 - **A5.** Camera streaming latency is about 60 ms from the control Pi to the topside computer. Tether bandwidth is still unknown.
 
+**Team answers (Victoria Zhang, relayed 2026-10-26).**
+- **A6.** She will send the sketch on the Teensy, and the Pi and topside scripts, once she can recover them. V1 stays open.
+- **A7.** The depth sensor is a Bar02, and they run in fresh water. The code already assumes both: the MS5837 is set to the Bar02 model at 997 kg/m³ (`new_ctl.ino:232-233`).
+- **A8.** The IMU is mounted on its side, with its X axis on the yaw axis. So yaw rate from `gyroscope.x` (`new_ctl.ino:387`) is the right axis. The heading angle is not usable as computed: see finding 6.
+- **A9.** One claw grips with pneumatics. Two servos set its pitch and rotation. NEPI does not need to move them for stabilization.
+- **A10.** A pressure/humidity/temperature (PHT) sensor inside the housing is wired to the Teensy, which reads it. Neither the sensor nor the claw servos are in the public repo, so both are part of the newer sketch.
+  - If it is an MS8607 (the kit part, `Docs/tbd/adafruit_ms8607_pht_sensor.md`), its pressure die has the Bar02's fixed address, 0x76, so the two need separate I2C buses. On the bench, use Wire1 (SDA 17, SCL 16), the only I2C port that costs no PWM pin (`Docs/tbd/pjrc_teensy_4_1.md:46-51`).
+  - If the sketch prints PHT readings in `$TNCTL`, the line is no longer 20 values, and `nepi_link` drops every line (`nepi_link.py:428`).
+- **A11.** The controller's triggers read 0 to 1023 ("I think"). That matches `tuning.ino:28` and the bench controller (P2).
+- Not answered yet: the thruster pin map and reversals (V15), and whether the `NORMALIZE_TRIGGER` and IMU-reset bugs are in the current sketch (V16).
+
 **Weekly report (2026-10-18).** The team will use Idea 1 or Idea 2. Both put the NEPI Pi on the same hub as the laptop and the control Pi, so the network and software are the same for both.
 - **Idea 1.** NEPI is topside and wall powered, and gets a camera copy over UDP.
 - **Idea 2.** NEPI is inside the enclosure with its own bottom camera and its own 5 V supply.
@@ -56,6 +67,13 @@ These findings shape the whole plan. They come from reading the code, not from a
 3. **The two script pairs do not mix.** `topside/modes/main.py` sends only changed controller events (`topside/modes/main.py:37-48`). `topside/modes/tuning.py` sends 20 gains first (`topside/modes/tuning.py:63-79`). Each Pi script crashes on the other pair's message, at `rpi/modes/tuning.py:76` or `rpi/modes/main.py:71`.
 4. **The Teensy will not start without its sensors.** Both sketches loop forever in `setup()` until a Bar02 depth sensor and a BNO085 IMU answer on I2C (`tuning.ino:244-273`, `new_ctl.ino:227-256`). The thruster pins are attached only after that (`tuning.ino:285-292`). The P6 bench copy of `new_ctl.ino` skips both sensors (D2).
 5. **Nothing stops a thruster when the link drops.** The Teensy keeps its last frame (`tuning.ino:342-379`). The Pi keeps resending its last frame when the topside drops (`rpi/modes/main.py:61-64, 84-88`). Ctrl+C on either script does not stop a spinning thruster. The bench supply's output switch does.
+6. **With the IMU on its side, the sketch's heading is unreliable** (A8). COMPUTED with the sketch's own formula; not bench tested.
+   - `quaternionToEuler()` (`new_ctl.ino:279-291`) is Adafruit's yaw-pitch-roll conversion, and it assumes the board lies flat. With X vertical it reports pitch near ±90°. At that pitch, yaw and roll stop being separate angles, and the reported yaw depends on which way the ROV leans by a fraction of a degree.
+   - Simulated with the heading held at 30°: with the ROV level and ±0.5° of wobble, the reported yaw was off by a median of 93°. With a steady 3° nose-down trim and ±1° of wobble, it was off by a median of 10° and up to 26°.
+   - The heading hold uses that yaw (`new_ctl.ino:485-491`), and NEPI receives it in `$TNCTL` columns 11 to 13. Yaw rate from `gyroscope.x` is unaffected. The team's newer sketch may already handle this.
+   - **Team-side fix:** rotate the quaternion by the mount before the conversion. Or store the mount in the BNO085 (`sh2_setReorientation()`, FRS record 0x2D3E, `Docs/npx/adafruit_bno085_imu.md`); then the gyro axes rotate too, and yaw rate goes back to `gyroscope.z`.
+   - **NEPI-side fix, built 2026-10-26 (uncommitted):** the driver's `imu_mount` setting (`ImuMount` in `rbx_mate_rov_link_node.py`) rebuilds the true orientation from the printed angles and the mount, and rotates the gyro rates. Against the sketch's own conversion and 2-decimal print, all 24 mounts come back within 0.02°. The default, `X_FORWARD_Y_LEFT`, is a flat board and changes nothing. NEPI's navpose transform (Transform3DIF) cannot do this, because it adds Euler offsets (`nepi_nav.py:1007-1019`) and zeroes the angular rates whenever a transform is set (`:1023-1024`).
+   - Both fixes need the mount's exact axes (V12). On the bench, mount the BNO085 on its side and set `imu_mount` to match before the IMU acceptance test in DRIVER_HANDOFF.md.
 
 ## Bench Diagram
 
@@ -932,10 +950,12 @@ To use the real NEPI Pi later, set `NEPI_LAN_IP` back to 192.168.68.23 in `~/ben
 ## QUESTIONS FOR VICTORIA
 
 1. **V1.** Please send the sketch that is on the Teensy now, and the Pi and topside scripts you run with it. Does your Pi script send the 20 gains as well as the 18 inputs? Blocks P5, P6, P7, P9.
+   - **Pending** (A6, 2026-10-26): she will send them once she can recover them. Meanwhile, a few `$TNCTL` lines copied from the topside display would show the telemetry format `nepi_link` must parse (A10).
 2. **V2.** What is the tether's link type and speed? We have your 60 ms latency, but not the bandwidth. Blocks P8 (send rounds, Idea 1) and P9.
 3. **V3.** Which down camera is fixed to the hull: the one on the claw, or the one facing the back claw? Does the back claw move through its view? Blocks P8 and P9.
 4. **V4.** Which OS and Python version does the topside computer run? Which controller model? Do its triggers report 0 to 255 or 0 to 1023? Blocks P2.
    - Our bench note, not an answer from the team: the bench controller's triggers report 0 to 1023 (P2, 2026-10-21). Your controller may differ.
+   - **Partly answered** (A11, 2026-10-26): 0 to 1023, "I think". Confirm with `topside/modes/gamepadtest.py`. OS, Python version and controller model are still open.
 5. **V5.** Which `/dev/videoN` and which UDP port is each of the four cameras, and how do you start the four streams? Blocks P3.
 6. **V6.** How do you flash the Teensy: from the Pi with `upload.sh`? How did you install the MS5837 library? Blocks P5.
    - Added after the bench (2026-10-21): the repo's `MS5837/` folder does not compile, because its `MS5837.h` is the newer Blue Robotics version and its `MS5837.cpp` the older one (P5). Do you build against the library-manager "BlueRobotics MS5837 Library" instead? Also, `upload.sh`'s `-p /dev/ttyACM0` fails on a fresh Teensy; do you flash with the port from `arduino-cli board list`?
@@ -944,6 +964,12 @@ To use the real NEPI Pi later, set `NEPI_LAN_IP` back to 192.168.68.23 in `~/ben
 9. **V9.** Will you add pitch and roll leveling on the Teensy, and an input for pitch and roll targets? Blocks P9.
 10. **V10.** For testing, is a "Stabilize" control on NEPI's page on the topside computer, with RB as the pilot's off switch, what you meant by a hotkey on the computer? Blocks P9.
 11. **V11.** Is the current limiter meant to reduce thrust as a stick goes further? `limit_current()` (`new_ctl.ino:521-550`) scales pulse width linearly against a summed-amps estimate for all four thrusters in a group. So thrust is not monotonic in stick travel. COMPUTED: RY past about 60 percent gives less vertical thrust than 60 percent does, and the triggers behave the same way. The limiter also models all eight thrusters on the bench, where only one is connected. Seen on 2026-10-21: holding LY full and pushing RY past about 50 percent cut HFL from 1700 to 1651 µs, a slight slowdown. Does your deployed sketch do the same? Affects P6, P7 and P9.
+12. **V12.** Does the IMU board's X arrow point up or down, and which way does its Y arrow point: forward, back, left or right? Does the heading hold keep its heading in the water? The answer picks the driver's `imu_mount` value (finding 6).
+13. **V13.** Which PHT sensor is it, on which Teensy pins, and does `$TNCTL` include its readings? Blocks `nepi_link`'s telemetry parsing (A10).
+14. **V14.** Which Teensy pins drive the two claw servos, what switches the pneumatic valve, and which controller inputs move each one? In NEPI control, NEPI owns LY, LX, RY, LT and RT, and any of them pushed past a quarter of its travel hands control back to the pilot. Blocks P9.
+    - Since 2026-10-28, NEPI can move the claw servos in NEPI control through the inputs the sketch already reads (LINK_PROTOCOL "Servos"). The answer sets `NEPI_SERVO_n_*` in `nepi_link.yaml`. It also needs to say whether holding an input moves a servo, or one press is one step. The step-per-press kind cannot be driven this way.
+15. **V15.** Which Teensy pin drives which thruster, and are any thrusters reversed in code or wiring? Asked 2026-10-23, not yet answered. Blocks P7 and P9.
+16. **V16.** Are the `NORMALIZE_TRIGGER` parentheses bug and the IMU-reset hang in your current sketch? Asked 2026-10-23; waits on V1.
 
 ## Doc Changes Pending
 

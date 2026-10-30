@@ -17,3 +17,8 @@ NEPI_YAW_SIGN: 1              # +1 or -1, still to be measured on the bench
 NEPI_TRIGGER_DEADZONE: 40     # TRIGGER_DEADZONE_CONST in the P6 bench copy of new_ctl.ino
 NEPI_TRIGGER_MAX: 1023        # TRIGER_MAGNITUDE in the P6 bench copy of new_ctl.ino
 NEPI_TAKEOVER_FRACTION: 0.25  # Any movement input past this share of its travel ends NEPI control
+# Servos NEPI may move in NEPI control (LINK_PROTOCOL "Servos"). Which inputs
+# move the claw is still open (V14), so these stay commented out until the
+# team answers. Example: the claw's pitch on the D-pad's up/down.
+#NEPI_SERVO_1_NAME: claw_pitch
+#NEPI_SERVO_1_INPUT: ABS_HAT0Y

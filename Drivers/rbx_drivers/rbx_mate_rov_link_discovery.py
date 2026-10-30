@@ -35,8 +35,17 @@
 # down and teleop readiness goes False), not a reason to kill it.
 #
 # The NEPI container uses host networking, so no port mapping is needed.
+#
+# Servos: the status names the Pi's servos (LINK_PROTOCOL "Servos"). With
+# the rbx node, discovery launches one SVX node per servo it heard of
+# (rbx_mate_rov_link_servo_node.py) and manages them as one set: a lost
+# servo node purges the set, and the next cycle relaunches it all. A servo
+# added on the Pi later needs the driver disabled and enabled; the rbx node
+# warns when the lists differ.
 
+import copy
 import json
+import re
 import socket
 import time
 
@@ -72,6 +81,9 @@ class MateRovLinkDiscovery:
   # Same bound and same accept rule as fake_nepi.py's StatusReceiver.
   MAX_DATAGRAM_BYTES = 1200
   PROTOCOL_VERSION = 1
+  # The Pi's servo limits (nepi_link.py MAX_SERVOS and SERVO_NAME)
+  MAX_SERVOS = 4
+  SERVO_NAME = re.compile(r'^[a-z][a-z0-9_]{0,15}$')
 
   ################################################
   def __init__(self):
@@ -128,10 +140,11 @@ class MateRovLinkDiscovery:
         port_held = True
     path_str = "MATE_ROV_LINK_" + self.host + "_" + self.status_port
     if port_held == False and path_str not in self.active_paths_list and path_str not in self.dont_retry_list:
-      if self.checkForMateRovLinkDevice(self.host, self.status_port):
+      [found, servo_names] = self.probeStatus(self.host, self.status_port)
+      if found:
         self.logger.log_info("MATE ROV link status detected from " + self.host + " on port " +
-                             self.status_port + ". Launching mate rov link rbx node")
-        success = self.launchMateRovLinkDeviceNode(path_str)
+                             self.status_port + ". Launching mate rov link rbx node, servos: " + str(servo_names))
+        success = self.launchMateRovLinkDeviceNode(path_str, servo_names)
         if success:
           self.active_paths_list.append(path_str)
 
@@ -165,6 +178,13 @@ class MateRovLinkDiscovery:
       self.logger.log_warn("MATE ROV link options changed for " + path_str +
                            "... purging from managed list")
       purge_node = True
+    # and each servo node. A lost one relaunches the whole set, which also
+    # hands the ROV back to the pilot when the rbx node shuts down.
+    for servo_entry in device_entry["servo_nodes"]:
+      if purge_node == False and servo_entry["subproc"].poll() is not None:
+        self.logger.log_warn("MATE ROV link servo node " + servo_entry["node_name"] +
+                             " is no longer running... purging " + path_str + " from managed list")
+        purge_node = True
 
     if purge_node:
       self.killDeviceProcesses(device_entry)
@@ -177,7 +197,10 @@ class MateRovLinkDiscovery:
 
 
   def killDeviceProcesses(self, device_entry):
-    # Kill the mate rov link rbx node subprocess for a device entry
+    # Kill the mate rov link servo and rbx node subprocesses for a device entry
+    for servo_entry in device_entry.get("servo_nodes", []):
+      self.logger.log_info("Killing mate rov link servo node: " + servo_entry["node_name"])
+      nepi_drvs.killDriverNode(servo_entry["node_name"], servo_entry["subproc"])
     rbx_node_name = device_entry.get("rbx_node_name")
     rbx_subproc = device_entry.get("rbx_subproc")
     if rbx_subproc is not None:
@@ -188,13 +211,19 @@ class MateRovLinkDiscovery:
   ##########  MATE ROV LINK PROCESSES
 
   def checkForMateRovLinkDevice(self, host_str, port_str):
+    return self.probeStatus(host_str, port_str)[0]
+
+  def probeStatus(self, host_str, port_str):
     # Listen, do not connect: bind the status port, wait up to PROBE_TIMEOUT_SEC
     # for one valid status from host_str, and close the socket either way. A
     # status is valid on the same terms fake_nepi.py's StatusReceiver accepts
     # one: from the configured address, at most MAX_DATAGRAM_BYTES, UTF-8 JSON,
     # an object with v 1 and type "status". A bind failure (the port is in use)
-    # reads as not found.
+    # reads as not found. Returns [found, servo_names]: the names in the
+    # status's servos field (LINK_PROTOCOL "Servos"), sorted, that pass the
+    # Pi's own name rule, at most MAX_SERVOS.
     found_device = False
+    servo_names = []
     sock = None
     try:
       sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -217,6 +246,9 @@ class MateRovLinkDiscovery:
           continue
         if isinstance(status, dict) and status.get('v') == self.PROTOCOL_VERSION and status.get('type') == 'status':
           found_device = True
+          servos = status.get('servos')
+          if isinstance(servos, dict):
+            servo_names = sorted(name for name in servos.keys() if self.SERVO_NAME.match(name))[:self.MAX_SERVOS]
     except Exception:
       found_device = False
     finally:
@@ -225,10 +257,12 @@ class MateRovLinkDiscovery:
           sock.close()
         except Exception:
           pass
-    return found_device
+    if not found_device:
+      servo_names = []
+    return found_device, servo_names
 
 
-  def launchMateRovLinkDeviceNode(self, path_str):
+  def launchMateRovLinkDeviceNode(self, path_str, servo_names):
     # path_str format: "MATE_ROV_LINK_<host>_<status_port>"
     success = False
     launch_id = path_str
@@ -254,7 +288,8 @@ class MateRovLinkDiscovery:
       'device_path': path_str,
       'host': self.host,
       'status_port': int(self.status_port),
-      'demand_port': self.demand_port
+      'demand_port': self.demand_port,
+      'servo_names': list(servo_names)
     }
     dict_param_name = nepi_sdk.create_namespace(self.base_namespace, rbx_node_name + "/drv_dict")
     nepi_sdk.set_param(dict_param_name, self.drv_dict)
@@ -278,6 +313,8 @@ class MateRovLinkDiscovery:
       device_entry["host"] = self.host
       device_entry["status_port"] = self.status_port
       device_entry["demand_port"] = self.demand_port
+      rbx_namespace = nepi_sdk.create_namespace(self.base_namespace, rbx_node_name)
+      device_entry["servo_nodes"] = self.launchServoNodes(path_str, servo_names, rbx_namespace)
       self.active_devices_dict[path_str] = device_entry
     else:
       self.logger.log_warn("Failed to launch node: " + rbx_node_name + " with msg: " + str(msg))
@@ -285,6 +322,39 @@ class MateRovLinkDiscovery:
         self.logger.log_warn("Will not retry launch for node: " + rbx_node_name)
         self.dont_retry_list.append(launch_id)
     return success
+
+
+  def launchServoNodes(self, path_str, servo_names, rbx_namespace):
+    # One SVX node per servo the Pi listed, each talking to the ROV through the
+    # rbx node's set_servo and link_status topics. Returns the launched ones,
+    # as servo entries; one that fails to launch is logged and left out.
+    servo_entries = []
+    # The servo node is the rbx node's sibling file, derived from NODE_DICT so
+    # a setup_new_driver.sh rename keeps the pair together
+    file_name = self.drv_dict['NODE_DICT']['file_name'].replace('_node.py', '_servo_node.py')
+    for servo_name in servo_names:
+      device_name = self.node_launch_name + "_servo_" + servo_name
+      node_name = nepi_system.get_device_alias(device_name)
+      # Deep-copied so a launch never mutates the drv_dict drivers_mgr owns
+      node_drv_dict = copy.deepcopy(self.drv_dict)
+      node_drv_dict['DEVICE_DICT'] = {
+        'device_name': device_name,
+        'device_path': path_str + "_" + servo_name,
+        'servo_name': servo_name,
+        'rbx_namespace': rbx_namespace
+      }
+      dict_param_name = nepi_sdk.create_namespace(self.base_namespace, node_name + "/drv_dict")
+      nepi_sdk.set_param(dict_param_name, node_drv_dict)
+      self.logger.log_info("Starting mate rov link servo node: " + node_name)
+      try:
+        [success, msg, subproc] = nepi_drvs.launchDriverNode(file_name, node_name)
+      except Exception as e:
+        [success, msg, subproc] = [False, str(e), None]
+      if success:
+        servo_entries.append(dict(node_name = node_name, subproc = subproc, servo_name = servo_name))
+      else:
+        self.logger.log_warn("Failed to launch servo node: " + node_name + " with msg: " + str(msg))
+    return servo_entries
 
 
   def killAllDevices(self, active_paths_list):

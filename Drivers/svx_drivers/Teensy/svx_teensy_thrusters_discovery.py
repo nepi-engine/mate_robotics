@@ -17,22 +17,28 @@
 
 # Discovery for a PJRC Teensy 4.1 running the teensy_thrusters firmware, which
 # generates the pulses for Blue Robotics Basic ESCs driving T200 thrusters and
-# for up to four hobby servos. The Pi-to-Teensy protocol is mate_robotics
-# Firmware/teensy_thrusters/PROTOCOL.md; section numbers below refer to it.
+# for up to four hobby servos, and reads a Blue Robotics Bar depth sensor. The
+# Pi-to-Teensy protocol is mate_robotics Firmware/teensy_thrusters/PROTOCOL.md;
+# section numbers below refer to it.
 #
 # CALL model, same contract as svx_servo_maestro_discovery.py and the SVX
 # template: drivers_mgr instantiates this class once with no arguments and
 # calls discoveryFunction() every poll cycle inside its own process, so there
 # is no init_node()/spin() here.
 #
-# PARTS. The devices option selects which parts of each board get nodes, the
-# way idx_zed's data_products option selects data products:
-#   * thrusters -- ONE node per board (svx_teensy_thrusters_node.py), a
+# PARTS. The devices option, a multi-select, picks which parts of each board
+# get nodes, the way idx_zed's data_products option selects data products:
+#   * thrusters    -- ONE node per board (svx_teensy_thrusters_node.py), a
 #     MotorsDeviceIF with one motor per thruster, because the thrusters are one
 #     vehicle's propulsion and the Teensy keeps them on one watchdog.
-#   * servos    -- ONE node PER SERVO (svx_teensy_thrusters_servo_node.py), each
-#     an SVXActuatorIF. SVXActuatorIF always lives at <node>/svx, so a node can
-#     host only one servo -- the same reason the Maestro runs a node per channel.
+#   * servos       -- ONE node PER SERVO (svx_teensy_thrusters_servo_node.py),
+#     each an SVXActuatorIF. SVXActuatorIF always lives at <node>/svx, so a node
+#     can host only one servo -- the same reason the Maestro runs a node per
+#     channel.
+#   * depth_sensor -- ONE node per board (svx_teensy_thrusters_depth_node.py),
+#     an NPXDeviceIF reporting depth from the Bar sensor on the Teensy's I2C.
+#     An NPX node launched by an SVX driver: the sensor is wired to the Teensy,
+#     so it can only be reached through this driver's port.
 # Every node of a board shares its one serial port under a per-transaction
 # file lock (PROTOCOL.md 2.1). Each node is a "launch id" (board key + part),
 # and each pass reconciles the wanted set against the running set like the
@@ -85,8 +91,9 @@ class SvxTeensyThrustersDiscovery:
     # Must match the firmware's ID reply (PROTOCOL.md 6.1 and 11).
     FIRMWARE_NAME = 'teensy_thrusters'
     PROTOCOL_MAJOR = 1
-    # Servo commands arrived in 1.1 (PROTOCOL.md 11).
+    # Servo commands arrived in 1.1, depth sensor commands in 1.2 (PROTOCOL.md 11).
     SERVO_PROTOCOL_MINOR = 1
+    DEPTH_PROTOCOL_MINOR = 2
 
     # Any rate but 134, which reboots a running Teensy into its bootloader.
     PROBE_BAUD = 115200
@@ -100,15 +107,13 @@ class SvxTeensyThrustersDiscovery:
     # relaunched no sooner than this, so a node that keeps failing cannot spin.
     RELAUNCH_DELAY_SEC = 10
 
-    # devices option -> parts (PROTOCOL.md has no notion of parts; this is the
-    # driver's). Kept as an explicit table so an unknown value is rejected.
-    DEVICES_OPTIONS = {
-        'thrusters': ['thrusters'],
-        'servos': ['servos'],
-        'thrusters,servos': ['thrusters', 'servos'],
-    }
+    # The parts the devices option can select (PROTOCOL.md has no notion of
+    # parts; this is the driver's). An entry not in this list is rejected.
     THRUSTERS = 'thrusters'
     SERVOS = 'servos'
+    DEPTH_SENSOR = 'depth_sensor'
+    PARTS = [THRUSTERS, SERVOS, DEPTH_SENSOR]
+    DEFAULT_DEVICES = [THRUSTERS, SERVOS]
 
     # esc_model -> fixed pulse parameters (Docs/Motors/bluerobotics_basic_esc.md:
     # the documented 1100/1500/1900 us, deadband 1500 +/- 25 us). Used here only
@@ -152,6 +157,18 @@ class SvxTeensyThrustersDiscovery:
     SERVO_RATES_HZ = [50, 100, 200, 333]
     SERVO_COUNT_RANGE = (1, 4)
     SERVO_HOST_LOSS_OPTIONS = ['hold', 'limp']
+
+    # Depth sensor options. The model list is the depth node's BAR_MODELS
+    # keys, used here only to validate; keep the two in step. The OSR values
+    # are the firmware's DC values (PROTOCOL.md 6.12).
+    DEPTH_MODELS = ['BlueRobotics Bar02 (MS5837-02BA)', 'BlueRobotics Bar30 (MS5837-30BA)']
+    DEPTH_OSR_VALUES = [256, 512, 1024, 2048, 4096, 8192]
+    # Fresh water is 997 and salt water 1029 kg/m3
+    # (Docs/npx/bluerobotics_bar_depth_sensor.md); the range leaves room for
+    # warm fresh water and dense brine, and rejects a value in g/cm3.
+    FLUID_DENSITY_KG_M3_RANGE = (950.0, 1100.0)
+    # Sea-level air pressure is 1013.25 mbar; about 700 mbar is 3000 m up.
+    SURFACE_PRESSURE_MBAR_RANGE = (700.0, 1100.0)
 
     node_launch_name = "teensy_thrusters"
 
@@ -229,7 +246,7 @@ class SvxTeensyThrustersDiscovery:
         if parts is None:
             # The devices option itself is invalid: change nothing.
             return self.active_paths_list
-        nothing_wanted = (parts[self.THRUSTERS] is None and parts[self.SERVOS] is None)
+        nothing_wanted = all(parts[part] is None for part in self.PARTS)
 
         ### Forget identities of boards that are gone or have no running node;
         ### such a board is re-probed before anything is launched for it.
@@ -278,6 +295,14 @@ class SvxTeensyThrustersDiscovery:
                     launch_id = self.launchId(key, self.SERVOS, n)
                     desired_dict[launch_id] = dict(board = board, part = self.SERVOS, servo_index = n,
                                                    config = node_cfg)
+
+            depth_cfg = parts[self.DEPTH_SENSOR]
+            if depth_cfg == 'invalid':
+                keep_ids.append(self.launchId(key, self.DEPTH_SENSOR))
+            elif depth_cfg is not None and self.checkDepthFits(identity, board):
+                launch_id = self.launchId(key, self.DEPTH_SENSOR)
+                desired_dict[launch_id] = dict(board = board, part = self.DEPTH_SENSOR, servo_index = None,
+                                               config = depth_cfg)
 
         ### Kill running nodes that are no longer wanted (part deselected, servo
         ### count lowered, board gone) or whose options changed. A node whose
@@ -347,24 +372,38 @@ class SvxTeensyThrustersDiscovery:
 
 
     def resolveParts(self, options):
-        # {'thrusters': cfg, 'servos': cfg}, each a dict, None (not selected) or
-        # 'invalid'; or None if the devices option itself is invalid.
-        devices = self.optionValue(options, 'devices', 'thrusters,servos').replace(' ', '')
-        if devices not in self.DEVICES_OPTIONS:
-            self.logOnChange('devices', "Invalid devices option '" + devices + "'; must be one of " +
-                             str(list(self.DEVICES_OPTIONS.keys())) + ". Nothing launched or stopped")
+        # {'thrusters': cfg, 'servos': cfg, 'depth_sensor': cfg}, each a dict,
+        # None (not selected) or 'invalid'; or None if the devices option
+        # itself is invalid.
+        selected = self.optionList(options, 'devices', self.DEFAULT_DEVICES)
+        unknown = [part for part in selected if part not in self.PARTS]
+        if len(unknown) > 0:
+            self.logOnChange('devices', "Invalid devices entries " + str(unknown) + "; each must be one of " +
+                             str(self.PARTS) + ". Nothing launched or stopped")
             return None
-        self.logOnChange('devices', "Driver devices: " + devices, warn = False)
-        selected = self.DEVICES_OPTIONS[devices]
-        parts = {self.THRUSTERS: None, self.SERVOS: None}
-        if self.THRUSTERS in selected:
-            parts[self.THRUSTERS] = self.resolveThrusterConfig(options)
-        else:
-            self.logOnChange('config', None, warn = False)
-        if self.SERVOS in selected:
-            parts[self.SERVOS] = self.resolveServoConfig(options)
-        else:
-            self.logOnChange('servo_config', None, warn = False)
+        if len(selected) == 0:
+            # The RUI cannot clear a multi-select (its None is ignored), so an
+            # empty value means a saved value was lost on the way here -- an
+            # engine without multi-select driver options does exactly that --
+            # not that the operator chose nothing. Treated as invalid, so it
+            # never stops running nodes.
+            self.logOnChange('devices', "The devices option selects nothing. The RUI cannot clear it, so the " +
+                             "saved value was lost, usually by a NEPI engine without multi-select driver " +
+                             "options; update nepi_engine. Nothing launched or stopped. To run no nodes, " +
+                             "disable the driver")
+            return None
+        self.logOnChange('devices', "Driver devices: " + ','.join(selected), warn = False)
+        resolvers = {self.THRUSTERS: (self.resolveThrusterConfig, 'config'),
+                     self.SERVOS: (self.resolveServoConfig, 'servo_config'),
+                     self.DEPTH_SENSOR: (self.resolveDepthConfig, 'depth_config')}
+        parts = dict()
+        for part in self.PARTS:
+            [resolve, log_key] = resolvers[part]
+            if part in selected:
+                parts[part] = resolve(options)
+            else:
+                parts[part] = None
+                self.logOnChange(log_key, None, warn = False)
         return parts
 
 
@@ -488,11 +527,55 @@ class SvxTeensyThrustersDiscovery:
         return config
 
 
+    def resolveDepthConfig(self, options):
+        # The depth sensor OPTIONS, validated, or 'invalid'
+        # (Docs/npx/bluerobotics_bar_depth_sensor.md, Configuration).
+        try:
+            depth_model = self.optionValue(options, 'depth_model', self.DEPTH_MODELS[0])
+            if depth_model not in self.DEPTH_MODELS:
+                raise ValueError("depth_model '" + depth_model + "' must be one of " + str(self.DEPTH_MODELS))
+            depth_osr = self.intOption(options, 'depth_osr', 1024, self.DEPTH_OSR_VALUES[0], self.DEPTH_OSR_VALUES[-1])
+            if depth_osr not in self.DEPTH_OSR_VALUES:
+                raise ValueError("depth_osr must be one of " + str(self.DEPTH_OSR_VALUES))
+            config = dict(depth_model = depth_model,
+                          depth_osr = depth_osr,
+                          fluid_density_kg_m3 = self.floatOption(options, 'fluid_density_kg_m3', 997.0,
+                                                                 *self.FLUID_DENSITY_KG_M3_RANGE),
+                          surface_pressure_mbar = self.floatOption(options, 'surface_pressure_mbar', 1013.25,
+                                                                   *self.SURFACE_PRESSURE_MBAR_RANGE))
+        except Exception as e:
+            self.logOnChange('depth_config', "Invalid depth sensor options, no depth sensor node launched: " + str(e))
+            return 'invalid'
+        self.logOnChange('depth_config', "Depth sensor options: " + str(config), warn = False)
+        return config
+
+
     def optionValue(self, options, name, default):
         value = options.get(name, {}).get('value', default)
         if value is None:
             value = default
         return str(value).strip()
+
+
+    def optionList(self, options, name, default):
+        # A Selections (multi-select) option's value as a list of strings,
+        # without repeats. Also accepts a comma-separated string -- what devices
+        # held when it was a single Selection ('thrusters,servos') -- and the
+        # str() of a list, which an engine without multi-select driver options
+        # stores, so a saved value keeps its meaning across the change.
+        value = options.get(name, {}).get('value', default)
+        if value is None:
+            value = default
+        if isinstance(value, (list, tuple)):
+            items = [str(item) for item in value]
+        else:
+            items = str(value).strip().strip('[]').split(',')
+        values = []
+        for item in items:
+            item = item.strip().strip('\'"').strip()
+            if item != '' and item not in values:
+                values.append(item)
+        return values
 
 
     def intOption(self, options, name, default, min_val, max_val):
@@ -565,6 +648,16 @@ class SvxTeensyThrustersDiscovery:
                              "; no servo nodes launched")
             return False
         self.logOnChange('servos:' + board['key'], None, warn = False)
+        return True
+
+
+    def checkDepthFits(self, identity, board):
+        if identity['protocol_minor'] < self.DEPTH_PROTOCOL_MINOR:
+            self.logOnChange('depth:' + board['key'], "Teensy " + str(board['serial_number']) + " on " + board['path'] +
+                             " runs protocol " + identity['protocol_version'] + ", which has no depth sensor commands; " +
+                             "reflash it with firmware 1.2 or later. No depth sensor node launched")
+            return False
+        self.logOnChange('depth:' + board['key'], None, warn = False)
         return True
 
 
@@ -682,6 +775,10 @@ class SvxTeensyThrustersDiscovery:
             # NODE_DICT so a setup_new_driver.sh rename keeps the pair together.
             node_file = node_file.replace('_node.py', '_servo_node.py')
             device_name = device_name + "_servo" + str(servo_index)
+        elif part == self.DEPTH_SENSOR:
+            # Another sibling file, derived the same way.
+            node_file = node_file.replace('_node.py', '_depth_node.py')
+            device_name = device_name + "_depth"
         node_name = nepi_system.get_device_alias(device_name)
         self.logger.log_info("Launching node: " + node_name + " on " + path_str)
 
@@ -702,6 +799,8 @@ class SvxTeensyThrustersDiscovery:
             # overwrite an operator's calibration on every relaunch.
             device_dict['servo_index'] = servo_index
             device_dict['servo_config'] = copy.deepcopy(config)
+        elif part == self.DEPTH_SENSOR:
+            device_dict['depth_config'] = copy.deepcopy(config)
         else:
             device_dict['thruster_config'] = copy.deepcopy(config)
         node_drv_dict['DEVICE_DICT'] = device_dict

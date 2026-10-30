@@ -50,6 +50,9 @@ NEPI_SWAY_SIGN: 1
 NEPI_YAW_SIGN: 1
 NEPI_TRIGGER_DEADZONE: 10   # must equal TRIGGER_DEADZONE_CONST in the deployed sketch
 NEPI_TRIGGER_MAX: 255       # must equal TRIGER_MAGNITUDE in the deployed sketch
+NEPI_SERVO_1_NAME: ''       # a servo NEPI may move, e.g. claw_pitch; empty = unused ("Servos" below)
+NEPI_SERVO_1_INPUT: ''      # the controller input the sketch moves it with, e.g. ABS_HAT0Y
+                            # NEPI_SERVO_2_* to NEPI_SERVO_4_* the same
 ```
 
 The stick dead zone is 3000 and full stick is 32767 in both sketches (`mcu/modes/new_ctl/new_ctl.ino:27, 29`). The trigger defaults above come from `new_ctl.ino:28, 30`. The tuning sketch uses 40 and 1023 instead (`mcu/modes/tuning/tuning.ino:28, 30`).
@@ -92,6 +95,7 @@ The bridge sends a status every 100 ms on its own timer, whether or not a new Te
 | `tn_age_ms` | integer, -1 or more | Age of `tn`, in ms; -1 before the first. |
 | `tn_count` | integer | Teensy lines parsed since start. Its change over time gives the telemetry rate. |
 | `tn_bad` | integer | Teensy lines ignored because they did not start with `$TNCTL,` or did not hold 20 values. |
+| `servos` | object | Each servo in the Pi's configuration ("Servos" below) by name, `true` while the pilot holds its input off neutral. `{}` when none are configured. Added to version 1 on 2026-10-28; an older Pi sends none. |
 
 ### Teensy telemetry (`tn`)
 
@@ -116,6 +120,8 @@ The Teensy prints one line every 50 passes through `loop()` (`new_ctl.ino:14, 64
 
 The names copy the firmware's labels. Which physical direction each sign means is not known yet; Phase 3 in the README measures it.
 
+Values 11 to 16 are in the IMU board's own frame. The NEPI driver turns them into the ROV's frame with its `imu_mount` setting, and reads 14 to 16 as gyro X, Y and Z whatever their names say (BENCH_SETUP_PLAN finding 6). The driver drops a status whose `tn` lacks any of values 9 to 16.
+
 ## Demand: NEPI to Pi
 
 NEPI sends a demand every 100 ms while the link is up, with `active` false while its hold is off, so the Pi can see the rising edge of `active` that turns assist on. That matches the Pi's 0.1 s serial write (`rpi/modes/main.py:84-88`), so sending faster would change nothing.
@@ -128,6 +134,7 @@ NEPI sends a demand every 100 ms while the link is up, with `active` false while
 | `yaw` | number, -1 to 1 | Fraction of a full trigger pull. Positive = clockwise seen from above (nose turns right). |
 | `pitch` | number, -1 to 1 | Reserved. The Pi ignores it until the Teensy firmware supports pitch. NEPI sends 0. |
 | `roll` | number, -1 to 1 | Reserved, the same as `pitch`. |
+| `servos` | object, name to number -1 to 1 | Optional. The value NEPI wants for each named servo ("Servos" below); 0 is the input's neutral. A name the Pi has no servo for is ignored. No field means no servo values. Added to version 1 on 2026-10-28. |
 
 These values are not speeds. On the Teensy, surge and sway are open-loop power, which means the stick sets thruster power directly and nothing measures the result (`new_ctl.ino:465-477`). A surge demand therefore means "this much stick". Yaw is a rate request: a full trigger asks the Teensy for 180 deg/s (`new_ctl.ino:482`).
 
@@ -156,7 +163,7 @@ Example datagram:
 | Sway | `abs(LX) >= 3000` | `LX = stick(sway * NEPI_SWAY_SIGN)` |
 | Yaw | `LT >= NEPI_TRIGGER_DEADZONE` or `RT >= NEPI_TRIGGER_DEADZONE` | With `y = yaw * NEPI_YAW_SIGN`: if `y > 0`, `LT = trigger(y)` and `RT = 0`; if `y < 0`, `LT = 0` and `RT = trigger(-y)`; if `y == 0`, both 0 |
 
-Every other input (RX, RY and all buttons) passes through from the pilot unchanged. NEPI never supplies RY, so depth stays with the Teensy's depth hold (`new_ctl.ino:426-435`).
+Every other input (RX, RY and all buttons) passes through from the pilot unchanged, except the servo inputs ("Servos" below). NEPI never supplies RY, so depth stays with the Teensy's depth hold (`new_ctl.ino:426-435`).
 
 **Dead-zone mapping.** The Teensy sets anything inside the dead zone to 0 and passes everything else through without rescaling (`new_ctl.ino:563-582`). So the bridge maps a demand onto the part of the range the Teensy acts on. `TD` is `NEPI_TRIGGER_DEADZONE` and `TM` is `NEPI_TRIGGER_MAX`:
 
@@ -185,6 +192,48 @@ trigger(m) = 0                                                        if m < 0.0
 - **Latch.** An engagement is an unbroken run of demands with `active` true. While NEPI sends `active` true, a newest status with `assist: false` latches NEPI to `active` false, if assist was on during this engagement (the pilot's button, or the bridge's 2 s timeout) or 0.5 s has passed since the engagement's first `active` true (a link outage, or a restarted bridge, which ignores a first `active` true). A stop command on NEPI also sets the latch. It clears only after NEPI's hold has sent no command for 1 s, so engaging again takes a fresh request. NEPI never turns assist back on by itself.
 - ROS, which NEPI is built on, counts sideways as positive to the left and turning as positive counter-clockwise. This protocol uses right and clockwise. The NEPI driver flips both signs, in one place.
 - NEPI never sends a nonzero `pitch` or `roll` in version 1.
+
+## Servos
+
+NEPI can move up to four servos that the team's sketch already moves from a controller input, such as the claw's. NEPI never drives a servo's pulses, and the team's code does not change: the bridge writes the input, the same way it writes the movement inputs. Added on 2026-10-28.
+
+**Configuration.** Each servo is numbered keys in the Pi's configuration, `NEPI_SERVO_1_*` to `NEPI_SERVO_4_*`:
+
+| Key | Meaning | Default |
+|---|---|---|
+| `NEPI_SERVO_n_NAME` | 1 to 16 lowercase letters, digits or `_`, starting with a letter. Empty or missing means the number is unused. | unused |
+| `NEPI_SERVO_n_INPUT` | The `gamepad_map` name of the input the sketch moves it with: `ABS_RX`, `ABS_HAT0X`, `ABS_HAT0Y`, `BTN_SOUTH`, `BTN_EAST`, `BTN_NORTH`, `BTN_WEST`, `BTN_THUMBL`, `BTN_THUMBR`, `BTN_START` or `BTN_SELECT`. The movement inputs NEPI already owns, LB (slow mode) and RB (the NEPI control button) are not allowed. | none |
+| `NEPI_SERVO_n_MIN`, `_NEUTRAL`, `_MAX` | The input's raw range, with MIN <= NEUTRAL <= MAX and MIN < MAX | RX -32767, 0, 32767; D-pad -1, 0, 1; buttons 0, 0, 1 |
+| `NEPI_SERVO_n_DEADZONE` | The pilot holds the input while it is more than this from NEUTRAL | RX 2999, since the Teensy zeroes \|RX\| < 3000 (`new_ctl.ino:570`); others 0 |
+
+Two servos may not share a name or an input. Any bad value turns the link off, as for every other key.
+
+**Mapping.** A value v from -1 to 1 becomes NEUTRAL + v × (MAX − NEUTRAL) for v ≥ 0, and NEUTRAL + v × (NEUTRAL − MIN) below 0, rounded half away from NEUTRAL. So a D-pad is pressed for \|v\| ≥ 0.5 and a button for v ≥ 0.5; a negative v leaves a button released.
+
+**Pi rules.**
+- **Pilot mode:** the pilot's input passes through, and NEPI's values are ignored.
+- **NEPI control:** the input carries NEPI's value from the newest demand. It is NEUTRAL while the demand is older than 250 ms or has no value for that servo.
+- **The pilot wins per input:** while the pilot holds a servo's input off neutral, the pilot's value passes through for that input alone. Unlike a movement input, it never ends NEPI control.
+
+**NEPI rules.**
+- The driver accepts a servo value only while the newest status shows NEPI control. It drops every value when NEPI control ends, so a handover starts each servo at neutral.
+- A value holds until it is changed; unlike a teleop command it never goes stale. RBX Stop leaves the servos alone.
+- Values go out rounded to 4 decimals, and only with `active` true.
+
+**What a value means is up to the sketch.**
+- If the input sets the servo's angle (a stick), a value is a position.
+- If holding the input moves the servo (a held D-pad or button), a value is a direction to keep moving. On NEPI's servo page that is continuous mode.
+- A sketch that moves one step per press, rather than while held, cannot be driven this way, because the bridge holds the input rather than pressing it again.
+
+**The claw.** The claw servos are Axon MAX MK2s (`Docs/svx/axon_max_mk2_servo.md`). Which inputs move them, and how, is still open (BENCH_SETUP_PLAN V14). An Axon flashed with its continuous-rotation firmware reads its pulse as speed, so it would need continuous mode. In servo mode it can travel about 350°, so set the NEPI servo's `min_deg` and `max_deg` to the angles the sketch's two input ends reach.
+
+**On NEPI.**
+- Discovery reads the servo names from the status it probes, and launches one SVX node per servo (`Drivers/rbx_drivers/rbx_mate_rov_link_servo_node.py`), so each servo has its own page on NEPI.
+- Each servo node sends its value to the rbx node's `set_servo` topic as a `std_msgs/String` with JSON `{"name": ..., "value": ...}`, and reads the rbx node's `link_status`, which gains a `servos` object of `value` and `pilot` per servo.
+- In the servo node, 0° is the input's neutral, `max_deg` its high end and `min_deg` its low end.
+- Changing the Pi's servo list takes the driver disabled and enabled; the rbx node warns when the lists differ.
+
+**Size.** Four servos with 16-character names keep the worst-case status at 1154 bytes (`test_nepi_link.py`).
 
 ## Video to NEPI
 

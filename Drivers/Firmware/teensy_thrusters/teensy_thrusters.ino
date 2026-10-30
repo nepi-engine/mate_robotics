@@ -1,12 +1,12 @@
 // teensy_thrusters -- Teensy 4.1 pulse generator for Blue Robotics Basic ESCs
-// and hobby servos
+// and hobby servos, and reader for a Blue Robotics Bar depth sensor
 //
-// Implements PROTOCOL.md (protocol 1.1) in this folder. Read that first; this
+// Implements PROTOCOL.md (protocol 1.2) in this folder. Read that first; this
 // file follows its section numbers in comments.
 //
 // Build: Arduino IDE + Teensyduino, Board "Teensy 4.1", USB Type "Serial",
 // CPU Speed 600 MHz (the pulse math assumes the 150 MHz bus clock that speed
-// gives). No third-party libraries.
+// gives). No third-party libraries; Wire is bundled with Teensyduino.
 //
 // SAFETY SUMMARY (PROTOCOL.md sections 8 and 9):
 //   * Every thruster channel outputs stop_us (1500 us) from the first lines of
@@ -29,15 +29,29 @@
 // Servo commands never feed the thruster watchdog, and the thruster watchdog
 // never moves a servo: a servo holds its last pulse until told otherwise. On
 // DTR falling, servos hold or go limp per the SC host_loss setting.
+//
+// DEPTH SENSOR (PROTOCOL.md 4.2 and 6.12-6.14): a Bar02 or Bar30 (TE MS5837)
+// on Wire, SDA 18 / SCL 19. I2C is untouched until the host sends DC, so a
+// host that never asks gets exactly the 1.1 behavior. Once enabled, the
+// sensor is sampled in the background by a non-blocking state machine, at
+// most one or two short I2C transactions per loop() pass, and the host polls
+// the raw readings with DV. The conversion math is the host's, because it
+// differs per sensor model and the model cannot be read from the chip.
+// SAFETY: the Teensy 4 Wire library bounds every master transaction (about
+// 50 ms, plus a 16 ms bus-idle wait), so a faulty bus delays the watchdog
+// check by at most about 70 ms per loop() pass and cannot stop it. After
+// DEPTH_MAX_FAILURES failures in a row the sensor is re-probed only once a
+// second, so a dead bus costs at most one such delay per second.
 
 #include <Arduino.h>
+#include <Wire.h>
 
 // ---------------------------------------------------------------------------
 // Identity (PROTOCOL.md 6.1 and 11)
 // ---------------------------------------------------------------------------
 static const char FIRMWARE_NAME[] = "teensy_thrusters";
-static const char PROTOCOL_VERSION[] = "1.1";
-static const char FIRMWARE_VERSION[] = "1.1.0";
+static const char PROTOCOL_VERSION[] = "1.2";
+static const char FIRMWARE_VERSION[] = "1.2.0";
 
 // ---------------------------------------------------------------------------
 // Channel and pin map (PROTOCOL.md 4)
@@ -79,6 +93,27 @@ static const uint32_t SERVO_ALLOWED_RATES_HZ[] = {50, 100, 200, 333};
 static const uint32_t SERVO_DEFAULT_RATE_HZ = 50;
 static const uint32_t SERVO_DEFAULT_MIN_US = 1000;
 static const uint32_t SERVO_DEFAULT_MAX_US = 2000;
+
+// Depth sensor (PROTOCOL.md 4.2 and 5.2). Commands and timings are the
+// MS5837 datasheet's (Docs/npx/bluerobotics_bar_depth_sensor.md).
+static const uint8_t DEPTH_I2C_ADDRESS = 0x76;        // fixed on every Bar sensor
+static const uint32_t DEPTH_I2C_CLOCK_HZ = 100000;
+static const uint8_t MS5837_RESET = 0x1E;
+static const uint8_t MS5837_CONVERT_D1 = 0x40;        // pressure; + 2 * OSR index
+static const uint8_t MS5837_CONVERT_D2 = 0x50;        // temperature; + 2 * OSR index
+static const uint8_t MS5837_ADC_READ = 0x00;
+static const uint8_t MS5837_PROM_READ = 0xA0;         // + 2 * word number
+static const uint8_t MS5837_PROM_WORDS = 7;
+static const uint8_t DEPTH_OSR_COUNT = 6;
+static const uint32_t DEPTH_OSR_VALUES[DEPTH_OSR_COUNT] = {256, 512, 1024, 2048, 4096, 8192};
+// Maximum conversion time per OSR: the Bar30's, the longer of the two models,
+// rounded up by about 5%. "Maximum values must be used to determine waiting
+// times" (datasheet); reading early returns 0 or a wrong result.
+static const uint32_t DEPTH_CONVERSION_US[DEPTH_OSR_COUNT] = {650, 1250, 2400, 4800, 9500, 19000};
+static const uint32_t DEPTH_RESET_US = 10000;         // Blue Robotics' libraries wait 10 ms
+static const uint32_t DEPTH_SAMPLE_PERIOD_MS = 20;    // at most 50 samples a second
+static const uint32_t DEPTH_PROBE_INTERVAL_MS = 1000;
+static const uint32_t DEPTH_MAX_FAILURES = 3;         // in a row, before re-probing
 
 // ---------------------------------------------------------------------------
 // Framing (PROTOCOL.md 3)
@@ -125,6 +160,35 @@ static uint32_t servo_max_us[SERVO_COUNT];
 static bool servo_cfg_received = false;   // SV <scfg>: 0 after a reboot
 // Pulse width each servo is outputting; 0 = off (held LOW, servo limp).
 static uint32_t servo_out_us[SERVO_COUNT];
+
+// Depth sensor state (PROTOCOL.md 6.12-6.14). OFF until the host sends DC;
+// SEARCHING while nothing answers at 0x76; BAD_PROM while something answers
+// but its calibration words fail the check; OK while sampling.
+enum DepthState { DEPTH_OFF, DEPTH_SEARCHING, DEPTH_BAD_PROM, DEPTH_OK };
+static const char *DEPTH_STATE_NAMES[] = {"OFF", "SEARCHING", "BAD_PROM", "OK"};
+// What the sensor is doing between loop() passes.
+enum DepthStep { DSTEP_IDLE, DSTEP_RESET, DSTEP_D1, DSTEP_D2 };
+
+static bool depth_cfg_received = false;   // DV <dcfg>: 0 after a reboot
+static bool wire_started = false;
+static DepthState depth_state = DEPTH_OFF;
+static DepthStep depth_step = DSTEP_IDLE;
+static uint8_t depth_osr_index = 2;       // OSR 1024 until DC says otherwise
+// No sensor command is sent before this micros() value: a reset or a
+// conversion may still be running, and a command sent into a conversion
+// corrupts its result (datasheet).
+static uint32_t depth_due_us = 0;
+static uint32_t depth_last_probe_ms = 0;
+static uint32_t depth_last_start_ms = 0;
+static uint32_t depth_failures = 0;       // in a row
+static uint16_t depth_prom[MS5837_PROM_WORDS];
+static uint32_t depth_detects = 0;        // times a sensor passed the PROM check
+static uint32_t depth_seq = 0;            // complete samples since boot
+static uint32_t depth_sample_ms = 0;      // millis() of the latest sample
+static uint32_t depth_d1 = 0;             // raw pressure of the latest sample
+static uint32_t depth_d2 = 0;             // raw temperature of the latest sample
+static uint32_t depth_d1_pending = 0;     // D1 of the sample in progress
+static uint32_t depth_errors = 0;         // failed reads while OK
 
 // Receive line buffer: the characters after '$'.
 static char rx_buf[MAX_AFTER_DOLLAR + 1];
@@ -219,6 +283,189 @@ static bool servoRateAllowed(uint32_t rate_hz) {
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Depth sensor (PROTOCOL.md 4.2 and 6.12-6.14)
+// ---------------------------------------------------------------------------
+
+// One command byte. True if the sensor acknowledged it.
+static bool depthCommand(uint8_t cmd) {
+  Wire.beginTransmission(DEPTH_I2C_ADDRESS);
+  Wire.write(cmd);
+  return Wire.endTransmission() == 0;
+}
+
+// A command, then nbytes read back MSB first.
+static bool depthRead(uint8_t cmd, uint8_t nbytes, uint32_t *out) {
+  if (!depthCommand(cmd)) {
+    return false;
+  }
+  if (Wire.requestFrom(DEPTH_I2C_ADDRESS, nbytes) != nbytes) {
+    while (Wire.available() > 0) {
+      Wire.read();
+    }
+    return false;
+  }
+  uint32_t value = 0;
+  for (uint8_t i = 0; i < nbytes; i++) {
+    value = (value << 8) | (uint8_t)Wire.read();
+  }
+  *out = value;
+  return true;
+}
+
+// The datasheet's CRC-4 over PROM words 0-6, line for line
+// (Docs/npx/bluerobotics_bar_depth_sensor.md, "CRC-4 check").
+static uint8_t depthCrc4(const uint16_t *prom) {
+  uint16_t n_prom[8];
+  for (uint8_t i = 0; i < MS5837_PROM_WORDS; i++) {
+    n_prom[i] = prom[i];
+  }
+  n_prom[0] &= 0x0FFF;   // CRC bits replaced by 0
+  n_prom[7] = 0;
+  uint32_t n_rem = 0;
+  for (uint8_t cnt = 0; cnt < 16; cnt++) {
+    if (cnt % 2 == 1) {
+      n_rem ^= (uint16_t)(n_prom[cnt >> 1] & 0x00FF);
+    } else {
+      n_rem ^= (uint16_t)(n_prom[cnt >> 1] >> 8);
+    }
+    for (uint8_t n_bit = 8; n_bit > 0; n_bit--) {
+      if (n_rem & 0x8000) {
+        n_rem = (n_rem << 1) ^ 0x3000;
+      } else {
+        n_rem = (n_rem << 1);
+      }
+    }
+  }
+  return (uint8_t)((n_rem >> 12) & 0x000F);
+}
+
+// Read and check the calibration words. Returns the state the probe leaves
+// the sensor in.
+static DepthState depthReadProm() {
+  uint16_t words[MS5837_PROM_WORDS];
+  for (uint8_t n = 0; n < MS5837_PROM_WORDS; n++) {
+    uint32_t word;
+    // Stop at the first failure: a stuck bus costs one timeout, not seven.
+    if (!depthRead(MS5837_PROM_READ + 2 * n, 2, &word)) {
+      return DEPTH_SEARCHING;
+    }
+    words[n] = (uint16_t)word;
+  }
+  if (depthCrc4(words) != (words[0] >> 12)) {
+    return DEPTH_BAD_PROM;
+  }
+  // An all-zero PROM passes the CRC, and a coefficient of 0 or 0xFFFF means
+  // the bus read nothing real.
+  for (uint8_t n = 1; n < MS5837_PROM_WORDS; n++) {
+    if (words[n] == 0 || words[n] == 0xFFFF) {
+      return DEPTH_BAD_PROM;
+    }
+  }
+  for (uint8_t n = 0; n < MS5837_PROM_WORDS; n++) {
+    depth_prom[n] = words[n];
+  }
+  return DEPTH_OK;
+}
+
+// A read failed while sampling. Back off a full conversion, because the
+// failed command may have started one, and fall back to probing after
+// DEPTH_MAX_FAILURES in a row.
+static void depthFailed(uint32_t now) {
+  depth_errors++;
+  depth_failures++;
+  depth_step = DSTEP_IDLE;
+  depth_due_us = micros() + DEPTH_CONVERSION_US[DEPTH_OSR_COUNT - 1];
+  if (depth_failures >= DEPTH_MAX_FAILURES) {
+    depth_state = DEPTH_SEARCHING;
+    depth_last_probe_ms = now;   // next probe one interval from now
+  }
+}
+
+// One step of the sampling cycle per call: reset and probe while searching;
+// convert D1, read it, convert D2, read it while OK. Never waits.
+static void serviceDepth(uint32_t now) {
+  if (depth_state == DEPTH_OFF) {
+    return;
+  }
+  // Signed difference: correct across the micros() wrap.
+  if ((int32_t)(micros() - depth_due_us) < 0) {
+    return;
+  }
+  switch (depth_step) {
+    case DSTEP_IDLE:
+      if (depth_state != DEPTH_OK) {
+        if ((now - depth_last_probe_ms) < DEPTH_PROBE_INTERVAL_MS) {
+          return;
+        }
+        depth_last_probe_ms = now;
+        // Reset loads the PROM into the chip's registers (datasheet).
+        // No acknowledge means nothing at 0x76 yet.
+        if (depthCommand(MS5837_RESET)) {
+          depth_step = DSTEP_RESET;
+          depth_due_us = micros() + DEPTH_RESET_US;
+        } else {
+          depth_state = DEPTH_SEARCHING;
+        }
+        return;
+      }
+      if ((now - depth_last_start_ms) < DEPTH_SAMPLE_PERIOD_MS) {
+        return;
+      }
+      depth_last_start_ms = now;
+      if (!depthCommand(MS5837_CONVERT_D1 + 2 * depth_osr_index)) {
+        depthFailed(now);
+        return;
+      }
+      depth_step = DSTEP_D1;
+      depth_due_us = micros() + DEPTH_CONVERSION_US[depth_osr_index];
+      return;
+
+    case DSTEP_RESET:
+      depth_step = DSTEP_IDLE;
+      depth_state = depthReadProm();
+      if (depth_state == DEPTH_OK) {
+        depth_failures = 0;
+        depth_detects++;
+        depth_last_start_ms = now - DEPTH_SAMPLE_PERIOD_MS;   // first sample at once
+      }
+      return;
+
+    case DSTEP_D1: {
+      uint32_t d1;
+      // An ADC result of 0 means the read was early or overlapped a
+      // conversion (datasheet): a bad read, not a reading.
+      if (!depthRead(MS5837_ADC_READ, 3, &d1) || d1 == 0) {
+        depthFailed(now);
+        return;
+      }
+      depth_d1_pending = d1;
+      if (!depthCommand(MS5837_CONVERT_D2 + 2 * depth_osr_index)) {
+        depthFailed(now);
+        return;
+      }
+      depth_step = DSTEP_D2;
+      depth_due_us = micros() + DEPTH_CONVERSION_US[depth_osr_index];
+      return;
+    }
+
+    case DSTEP_D2: {
+      uint32_t d2;
+      if (!depthRead(MS5837_ADC_READ, 3, &d2) || d2 == 0) {
+        depthFailed(now);
+        return;
+      }
+      depth_d1 = depth_d1_pending;
+      depth_d2 = d2;
+      depth_seq++;
+      depth_sample_ms = now;
+      depth_failures = 0;
+      depth_step = DSTEP_IDLE;
+      return;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +876,90 @@ static void handleServoStatus(size_t nfields) {
 }
 
 // ---------------------------------------------------------------------------
+// Depth sensor commands (PROTOCOL.md 6.12-6.14). None of them touches the
+// thrusters, the servos or the watchdog.
+// ---------------------------------------------------------------------------
+
+// DC,<osr>: sample the depth sensor at this oversampling ratio; 0 stops it.
+static void handleDepthConfigure(char **fields, size_t nfields) {
+  if (nfields != 2) {
+    sendError("FIELDS", "DC");
+    return;
+  }
+  uint32_t osr;
+  if (!parseUint(fields[1], &osr)) {
+    sendError("FORMAT", "DC");
+    return;
+  }
+  if (osr == 0) {
+    // A conversion in progress finishes by itself; depth_due_us still
+    // guards the next command if sampling is turned back on.
+    depth_state = DEPTH_OFF;
+    depth_step = DSTEP_IDLE;
+    depth_cfg_received = true;
+    sendOk("DC");
+    return;
+  }
+  int index = -1;
+  for (uint8_t i = 0; i < DEPTH_OSR_COUNT; i++) {
+    if (DEPTH_OSR_VALUES[i] == osr) {
+      index = i;
+    }
+  }
+  if (index < 0) {
+    sendError("RANGE", "DC");
+    return;
+  }
+  // A conversion in progress keeps its own wait; the next one uses the new
+  // ratio. Mixing ratios within a sample is harmless: the OSR changes the
+  // resolution of D1 and D2, not their scale.
+  depth_osr_index = (uint8_t)index;
+  if (!wire_started) {
+    Wire.begin();
+    Wire.setClock(DEPTH_I2C_CLOCK_HZ);
+    wire_started = true;
+  }
+  if (depth_state == DEPTH_OFF) {
+    depth_state = DEPTH_SEARCHING;
+    depth_step = DSTEP_IDLE;
+    depth_last_probe_ms = millis() - DEPTH_PROBE_INTERVAL_MS;   // probe on the next pass
+  }
+  depth_cfg_received = true;
+  sendOk("DC");
+}
+
+// DV: depth sensor state and its latest raw sample.
+static void handleDepthValue(size_t nfields) {
+  if (nfields != 1) {
+    sendError("FIELDS", "DV");
+    return;
+  }
+  uint32_t age_ms = (depth_seq > 0) ? (millis() - depth_sample_ms) : 0;
+  uint32_t osr = (depth_state == DEPTH_OFF) ? 0 : DEPTH_OSR_VALUES[depth_osr_index];
+  char body[MAX_FRAME_CHARS];
+  snprintf(body, sizeof(body), "DV,%u,%s,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+           depth_cfg_received ? 1u : 0u, DEPTH_STATE_NAMES[depth_state], (unsigned long)osr,
+           (unsigned long)depth_detects, (unsigned long)depth_seq, (unsigned long)age_ms,
+           (unsigned long)depth_d1, (unsigned long)depth_d2, (unsigned long)depth_errors);
+  sendFrame(body);
+}
+
+// DP: the calibration words of the latest detection, and which detection
+// they came from, so the host never pairs a sample with another sensor's PROM.
+static void handleDepthProm(size_t nfields) {
+  if (nfields != 1) {
+    sendError("FIELDS", "DP");
+    return;
+  }
+  char body[MAX_FRAME_CHARS];
+  int n = snprintf(body, sizeof(body), "DP,%lu", (unsigned long)depth_detects);
+  for (uint8_t w = 0; w < MS5837_PROM_WORDS && n > 0 && (size_t)n < sizeof(body); w++) {
+    n += snprintf(body + n, sizeof(body) - n, ",%u", (unsigned)depth_prom[w]);
+  }
+  sendFrame(body);
+}
+
+// ---------------------------------------------------------------------------
 // Frame handling (PROTOCOL.md 3 and 7)
 // ---------------------------------------------------------------------------
 
@@ -716,6 +1047,12 @@ static void handleFrame(char *s, size_t len) {
     handleServoOff(fields, nfields);
   } else if (strcmp(cmd, "SV") == 0) {
     handleServoStatus(nfields);
+  } else if (strcmp(cmd, "DC") == 0) {
+    handleDepthConfigure(fields, nfields);
+  } else if (strcmp(cmd, "DV") == 0) {
+    handleDepthValue(nfields);
+  } else if (strcmp(cmd, "DP") == 0) {
+    handleDepthProm(nfields);
   } else {
     sendError("UNKNOWN", cmd);
   }
@@ -851,4 +1188,7 @@ void loop() {
   checkArming(now);
   checkWatchdog(now);
   updateLed(now);
+  // Last, after every safety check: an I2C delay here postpones the next
+  // pass, never the checks of this one.
+  serviceDepth(now);
 }

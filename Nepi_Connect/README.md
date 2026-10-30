@@ -244,6 +244,7 @@ Nothing here is built yet. Recommended build order:
    - **On/off rule.** While the link is up, the driver sends a demand every 100 ms. It sends `active` true while it holds a teleop command newer than 250 ms and is not latched, with surge = linear.x, sway = -linear.y and yaw = -angular.z, each clamped to -1 to 1. linear.z is ignored. Otherwise it sends `active` false with every axis 0. While the link is down it sends nothing. The first `seq` comes from the wall clock, so a restarted node is always ahead of its previous run.
    - **Latch.** While it sends `active` true, a newest status with assist false latches the driver to `active` false, if assist was on during this engagement (RB, or the Pi's 2 s timeout) or 0.5 s has passed since the engagement's first `active` true (a link outage, or a restarted Pi script, which ignores a first `active` true). The latch clears only after no teleop command has arrived for 1 s, so the hold process must stop and restart its commands to engage again. Stop clears the stored command and sets the latch. NEPI never turns assist back on by itself.
    - **Link state for the hold process.** Every tick, the node publishes the link's state as JSON in a `std_msgs/String` on its own `link_status` topic: `link_up`, `latched`, `assist`, `assist_reason`, the four pilot flags, `slow`, `demand_age_ms` and `tn_age_ms`. `RBXRobotIF` has no fields for these.
+   - **Servos (added 2026-10-28).** The Pi can list up to four servos the sketch moves from a controller input, such as the claw's. Discovery launches one SVX node per servo, and NEPI moves them only in NEPI control. The team's code does not change. LINK_PROTOCOL "Servos" has the details.
 4. **Using `RBXRobotIF` as it is.** An earlier analysis expected a missing piece here: `goto_velocity` blocks, refuses new commands while one is active, and sleeps 0.5 s (nepi_engine repo, `nepi_api/src/nepi_api/device_if_rbx.py:1455, 1459, 1472`). But `RBXRobotIF` already has `set_teleop_velocity`. It is a stock `Twist` message with a queue of one, so the newest command wins, and it never blocks (`:644-657, 1278-1296`). So no interface change is needed, and the hold loop does not have to live inside the driver. Two small caveats:
    - The interface logs one info line per teleop message (`:1279`), which is noisy at 10 Hz. A throttled log would be a small engine change.
    - The interface has no teleop timeout. The driver owns the timeout, as `rbx_ardupilot` does with its own (nepi_drivers repo, `rbx_drivers/rbx_ardupilot_node.py:670`).
@@ -344,6 +345,7 @@ These are questions, not corrections. You know your robot better than we do.
    - Yaw rate is read from `gyroscope.x` (`new_ctl.ino:387`), but heading is a rotation about the sensor's z axis (`:285`). If the IMU is mounted flat, yaw rate would be `gyroscope.z`.
    - The heading-hold error is also worth a bench check. With target 0, `yaw_rate_controller.compute(shortest_angle(yaw, yaw_target))` asks for a rate of yaw minus target (`:485-491`). If a positive rate means heading increasing, that pushes away from the target. If the hold works in the water, the sign is flipped somewhere else, which is fine.
    - Both matter more now, because assist hands heading back to your hold many times a minute.
+   - **Update** (Victoria Zhang, relayed 2026-10-26): the IMU is mounted on its side, with X on the yaw axis, so `gyroscope.x` is the right yaw rate. The heading angle is the open problem now: the flat-board conversion puts pitch near ±90°, where yaw is unreliable. See [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md), finding 6.
 4. **`$TNCTL` header.** `main.py` forwards the line with `$TNCTL` still inside (`rpi/modes/main.py:105`), while `tuning.py` strips it (`tuning.py:118-119`). Is that intended? `nepi_link` works either way.
 5. **Telemetry rate.** We estimate about 4 Hz (Section 1). Is that enough for your own tuning? A smaller `SERIAL_TRANSMISSION_WRAP` (`new_ctl.ino:14`), such as 10 for about 20 Hz, would also give NEPI fresher depth and heading. USB serial carries that easily.
 
@@ -352,6 +354,7 @@ These are questions, not corrections. You know your robot better than we do.
 1. Which firmware and Pi script are installed on the robot today? (Section 8, note 1)
    - **Partly answered** (Victoria Zhang, 2026-10-16): the firmware is `mcu/modes/tuning/tuning.ino`. `power_thrusters()` is commented out in the repo because the public repo is an earlier version than what is on the Teensy.
    - Still open: which Pi and topside scripts run with it. No Pi script in the public repo sends the 313-byte frame the repo's `tuning.ino` reads. See [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md), "What the Team's Code Says", D1 and V1.
+   - **Pending** (2026-10-26): Victoria will send the sketch and both scripts once she can recover them.
 2. Which free static address on 192.168.68.0/24, outside any DHCP range, can NEPI use?
    - **Answered** (Victoria Zhang, 2026-10-16): 192.168.68.23. See [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md), P0 and P8.
 3. Is RB free for assist, or would you prefer another button?
@@ -367,15 +370,19 @@ These are questions, not corrections. You know your robot better than we do.
    - **Partly answered** (Victoria Zhang, 2026-10-16): camera streaming latency is about 60 ms from the control Pi to the topside computer.
    - Still open: the tether's link type and bandwidth. See [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md), P3, P8 and V2.
 6. Which operating system does the topside laptop run, which controller model do you use, and do the triggers report 0 to 255 or 0 to 1023?
+   - **Partly answered** (2026-10-26): the triggers read 0 to 1023 ("I think"). The OS and controller model are still open.
 7. Are you comfortable with the Pi change (`nepi_link.py` plus about five lines)? If not, we will plan the laptop-side merge instead.
 8. Would you like the systemd units?
 9. Does the robot tip in pitch or roll in the water?
 10. Would you accept a smaller trigger dead zone, or a heading-target input?
 11. Are you interested in Teensy leveling for pitch and roll, and later in NEPI pitch and roll targets?
 12. How is the IMU mounted, and does the heading hold turn back toward its target today? (Section 8, note 3)
+    - **Partly answered** (2026-10-26): on its side, with X on the yaw axis. Still open: which way X and Y point, and how well the heading hold works in the water (BENCH_SETUP_PLAN V12).
 13. Would you consider a faster telemetry rate, and a comms-loss timeout on the Teensy?
 14. When can we have pool time for Phases 3 and 4, and who will pilot?
 15. Will assist be used in competition runs, or only in practice?
+
+The 2026-10-26 answers on the depth sensor (Bar02, fresh water), the claws and the PHT sensor are recorded as A6 to A11 in [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md). The follow-up questions are V12 to V16 there.
 
 ## References
 

@@ -58,6 +58,16 @@
 #     teleop commands exactly while NEPI has the ROV.
 #   - Stop clears the stored command (neutral); NEPI keeps the ROV.
 #
+# Servos (decided 2026-10-28): the Pi's nepi_link.yaml can name up to four
+# controller inputs that move a servo in the team's sketch, such as the claw's
+# D-pad (LINK_PROTOCOL "Servos"); the team's code is not changed. The status
+# lists them, discovery launches one SVX node per servo
+# (rbx_mate_rov_link_servo_node.py), and each servo node sends its value here
+# on this node's set_servo topic. A value is accepted only while NEPI has the
+# ROV, goes out with every demand, holds until changed, and is dropped when
+# NEPI control ends, so the pilot's RB is the only way NEPI moves a servo. RBX
+# Stop leaves the servos alone; each has its own stop on the servo page.
+#
 # The robot state shows who has the ROV, PILOT or NEPI. Setting PILOT hands it
 # back (release_to_pilot); setting NEPI is refused, since only the pilot's RB
 # hands it over. The teleop_movement_enabled setting is what makes the Robots
@@ -66,14 +76,16 @@
 # The ROV has no mode machinery, no battery, no position fix and no goto
 # controller on the NEPI side, so modes, actions, gotos, home and manual motor
 # control are empty or None and RBXRobotIF reports the matching capabilities
-# False. The navpose carries depth and orientation from the Teensy telemetry in
-# each status. Which physical direction each of their signs means has not been
-# measured, and the bench Teensy has no sensors, so on the bench every value
-# reads 0.
+# False. The navpose carries depth, depth rate, orientation and angular rates
+# from the Teensy telemetry in each status, with orientation and rates turned
+# into the ROV's frame by the imu_mount setting (ImuMount). Which physical
+# direction each sign means has not been measured. The bench Teensy has a
+# Bar02 but no IMU yet, so orientation and its rates read 0 there.
 
 import copy
 import json
 import math
+import re
 import socket
 import threading
 import time
@@ -130,7 +142,12 @@ class MateRovLink(object):
   ERROR_PRINT_SEC = 10.0 # Each kind of message prints at most once per this period
   SOCKET_TIMEOUT_SEC = 0.2 # How often the receive thread checks for stop
   STATUS_FLAGS = ['assist', 'pilot_surge', 'pilot_sway', 'pilot_yaw', 'pilot_depth', 'slow']
-  TN_VALUES = ['depth_m', 'yaw_deg', 'pitch_deg', 'roll_deg'] # The tn values NEPI reads
+  TN_VALUES = ['depth_m', 'depth_m_s', 'yaw_deg', 'pitch_deg', 'roll_deg',
+               'yaw_deg_s', 'pitch_deg_s', 'roll_deg_s'] # The tn values NEPI reads
+  # The Pi's servo limits (nepi_link.py MAX_SERVOS and SERVO_NAME)
+  MAX_SERVOS = 4
+  SERVO_NAME = re.compile(r'^[a-z][a-z0-9_]{0,15}$')
+  SERVO_DECIMALS = 4 # Servo values go out rounded to this, which keeps the demand short
 
   def __init__(self, host, status_port = 5700, demand_port = 5701, bind_ip = '0.0.0.0',
                clock = time.monotonic, wall_clock = time.time, log = print):
@@ -159,6 +176,7 @@ class MateRovLink(object):
     self.nepi_control = False # As of the last send tick, to log changes
     self.cmd = None # [surge, sway, heave, yaw] of the stored teleop command, protocol axes
     self.cmd_time = None # clock() of the newest teleop command
+    self.servo_cmd = dict() # Servo name to the value NEPI sends, -1 to 1
     self.release_pending = False # The next demand is active false, handing the ROV back to the pilot
     self.seq = int(self.wall_clock() * self.SEQ_PER_SEC) & self.SEQ_MAX
 
@@ -278,11 +296,41 @@ class MateRovLink(object):
       self.reportError('set_teleop_velocity', e)
       return False, 'Teleop error: ' + str(e)
 
+  def set_servo(self, name, value):
+    """Store the value for one of the Pi's servos, sent with every demand.
+
+    Unlike a teleop command, a servo value never goes stale: it holds until it
+    is changed. It is accepted only while NEPI has the ROV, and every value is
+    dropped when NEPI control ends, so a handover starts each servo at
+    neutral, as it does the movement axes.
+
+    Args:
+        name (str): A servo name from the newest status.
+        value (float): -1 to 1, clamped. 0 is the input's neutral.
+
+    Returns:
+        list: [success (bool), msg (str)]. Nothing is stored on failure.
+    """
+    try:
+      if not self.isNumber(value):
+        return False, 'Servo value dropped: it must be a finite number'
+      with self.lock:
+        if not self.nepiControlLocked(self.clock()):
+          return False, ('Servo ' + str(name) + ' not moved: NEPI does not have the ROV '
+                         '(the pilot hands it over with RB)')
+        if name not in self.status['servos']:
+          return False, 'Servo ' + str(name) + ' not moved: the ROV Pi has no servo by that name'
+        self.servo_cmd[name] = self.clampAxis(value)
+      return True, 'Stored'
+    except Exception as e:
+      self.reportError('set_servo', e)
+      return False, 'Servo error: ' + str(e)
+
   def go_stop(self):
     """Clear the stored teleop command, so the next demand is neutral.
 
     NEPI keeps the ROV; the Teensy's own depth and heading holds keep it steady
-    while every axis is neutral.
+    while every axis is neutral. Servo values are left alone.
 
     Returns:
         list: [success (bool), msg (str)].
@@ -311,6 +359,7 @@ class MateRovLink(object):
         if not self.linkUpLocked(self.clock()):
           return False, 'Link down: nothing to release'
         self.cmd = None
+        self.servo_cmd = dict()
         self.release_pending = True
       return True, 'Releasing the ROV to the pilot'
     except Exception as e:
@@ -375,7 +424,11 @@ class MateRovLink(object):
             demand_age_ms, tn_age_ms (int) -- the Pi's ages plus the newest
                 status's age on this computer, so they keep growing while the
                 link is down; -1 when the Pi reports none;
-            status_bad (int) -- status datagrams dropped.
+            status_bad (int) -- status datagrams dropped;
+            servos (dict) -- each of the Pi's servos by name, as a dict:
+                value (float), what NEPI sends, 0.0 when nothing is stored;
+                pilot (bool), the pilot holds its input. Empty before the
+                first status.
     """
     try:
       with self.lock:
@@ -384,17 +437,20 @@ class MateRovLink(object):
         health = dict(running = self.recv_thread is not None, link_up = self.linkUpLocked(now),
                       nepi_control = self.nepiControlLocked(now), assist = False, assist_reason = '',
                       pilot_surge = False, pilot_sway = False, pilot_yaw = False, pilot_depth = False,
-                      slow = False, demand_age_ms = -1, tn_age_ms = -1, status_bad = self.status_bad)
+                      slow = False, demand_age_ms = -1, tn_age_ms = -1, status_bad = self.status_bad,
+                      servos = dict())
         if status is not None:
           for name in self.STATUS_FLAGS:
             health[name] = status[name]
           health['assist_reason'] = status['assist_reason']
           health['demand_age_ms'] = self.ageNowLocked(status['demand_age_ms'], now)
           health['tn_age_ms'] = self.ageNowLocked(status['tn_age_ms'], now)
+          for [name, held] in status['servos'].items():
+            health['servos'][name] = dict(value = self.servo_cmd.get(name, 0.0), pilot = held)
         return health
     except Exception as e:
       self.reportError('get_health', e)
-      return dict(running = False, link_up = False, nepi_control = False)
+      return dict(running = False, link_up = False, nepi_control = False, servos = dict())
 
   def get_tn(self):
     """Return the newest Teensy telemetry and its age.
@@ -445,20 +501,27 @@ class MateRovLink(object):
         notes.append('NEPI control off (' + self.status['assist_reason'] + '): the pilot has the ROV')
     if not link_up:
       self.cmd = None
+      self.servo_cmd = dict()
       self.release_pending = False
       return None, notes
     # Active true says NEPI is ready; a pending release sends active false once
     active = not self.release_pending
     self.release_pending = False
     # Values only while NEPI has the ROV, from a fresh command; otherwise neutral.
-    # Without NEPI control the command is dropped, so a handover starts neutral.
+    # Without NEPI control the command and the servo values are dropped, so a
+    # handover starts neutral.
     if not nepi_control:
       self.cmd = None
+      self.servo_cmd = dict()
     [surge, sway, heave, yaw] = [0.0, 0.0, 0.0, 0.0]
     if active and self.cmd is not None and now - self.cmd_time <= self.TELEOP_CMD_TIMEOUT_SEC:
       [surge, sway, heave, yaw] = self.cmd
+    servos = dict()
+    if active:
+      servos = dict((name, round(value, self.SERVO_DECIMALS)) for [name, value] in self.servo_cmd.items())
     demand = {'v': 1, 'type': 'demand', 'seq': self.seq, 't': round(self.wall_clock(), 3), 'active': active,
-              'surge': surge, 'sway': sway, 'heave': heave, 'yaw': yaw, 'pitch': 0.0, 'roll': 0.0}
+              'surge': surge, 'sway': sway, 'heave': heave, 'yaw': yaw, 'pitch': 0.0, 'roll': 0.0,
+              'servos': servos}
     self.seq = (self.seq + 1) & self.SEQ_MAX
     return demand, notes
 
@@ -515,8 +578,15 @@ class MateRovLink(object):
           return None, 'Status dropped: tn ' + name + ' must be a finite number'
     elif 'tn' not in message:
       return None, 'Status dropped: tn is missing'
+    # servos joined version 1 later: a Pi without them reports none
+    servos = message.get('servos', dict())
+    if not isinstance(servos, dict) or len(servos) > self.MAX_SERVOS:
+      return None, 'Status dropped: servos must be an object with at most ' + str(self.MAX_SERVOS) + ' servos'
+    for [name, held] in servos.items():
+      if not self.SERVO_NAME.match(name) or not isinstance(held, bool):
+        return None, 'Status dropped: servos must map servo names to true or false'
     status = dict(seq = seq, assist_reason = message['assist_reason'], demand_age_ms = message['demand_age_ms'],
-                  tn = tn, tn_age_ms = message['tn_age_ms'])
+                  tn = tn, tn_age_ms = message['tn_age_ms'], servos = dict(servos))
     for name in self.STATUS_FLAGS:
       status[name] = message[name]
     return status, 'Accepted'
@@ -581,6 +651,104 @@ class MateRovLink(object):
 
 
 #########################################
+# IMU Mount Class
+#########################################
+
+# Directions in the ROV's own axes, ROS body convention: x forward, y left, z up
+IMU_DIRECTIONS = [('FORWARD', (1, 0, 0)), ('BACK', (-1, 0, 0)), ('LEFT', (0, 1, 0)),
+                  ('RIGHT', (0, -1, 0)), ('UP', (0, 0, 1)), ('DOWN', (0, 0, -1))]
+# One option per square mount: where the board's printed X and Y arrows point.
+# The two must be perpendicular, which leaves 24.
+IMU_MOUNT_OPTIONS = ['X_' + x_name + '_Y_' + y_name
+                     for (x_name, x_dir) in IMU_DIRECTIONS for (y_name, y_dir) in IMU_DIRECTIONS
+                     if sum(a * b for (a, b) in zip(x_dir, y_dir)) == 0]
+IMU_MOUNT_FLAT = 'X_FORWARD_Y_LEFT' # Board flat, X forward: values pass through unchanged
+
+
+class ImuMount(object):
+  """The IMU board's mounting in the ROV, set by the node's imu_mount setting.
+
+  The Teensy prints the board's own orientation and gyro rates: yaw, pitch and
+  roll from Adafruit's quaternion conversion (new_ctl.ino:279-291), which is
+  Z-Y-X like NEPI's, and the three gyro axes. On a board that does not lie
+  flat with X forward, those are the board's angles, not the ROV's. With the
+  board on its side (the team's ROV, 2026-10-26) the conversion even reports
+  pitch near +-90 deg, where yaw and roll stop being separate angles. This
+  class rebuilds the board's rotation from the printed angles, which stays
+  exact there, and turns it and the rates into the ROV's frame.
+
+  A mount is named by where the board's X and Y arrows point, for example
+  X_UP_Y_LEFT; Z follows from the right-hand rule. It never calls nepi_sdk,
+  nepi_api or ROS, so Nepi_Connect/tools/test_rbx_mate_rov_link.py tests it
+  without ROS.
+  """
+
+  def __init__(self, name = IMU_MOUNT_FLAT):
+    """Builds the mount from an IMU_MOUNT_OPTIONS name.
+
+    Raises:
+        ValueError: name is not in IMU_MOUNT_OPTIONS.
+    """
+    if name not in IMU_MOUNT_OPTIONS:
+      raise ValueError('Unknown IMU mount ' + str(name))
+    directions = dict(IMU_DIRECTIONS)
+    [x_name, y_name] = name[len('X_'):].split('_Y_')
+    x_dir = directions[x_name]
+    y_dir = directions[y_name]
+    z_dir = (x_dir[1] * y_dir[2] - x_dir[2] * y_dir[1],
+             x_dir[2] * y_dir[0] - x_dir[0] * y_dir[2],
+             x_dir[0] * y_dir[1] - x_dir[1] * y_dir[0])
+    self.name = name
+    # Columns are the board's X, Y and Z arrows in ROV axes, so this times a
+    # board vector gives the same vector in ROV axes
+    self.matrix = [[x_dir[i], y_dir[i], z_dir[i]] for i in range(3)]
+
+  def orientation_to_rov(self, roll_deg, pitch_deg, yaw_deg):
+    """Turns the board's printed orientation into the ROV's.
+
+    Args:
+        roll_deg, pitch_deg, yaw_deg (float): The board's Z-Y-X angles, as
+            the Teensy prints them.
+
+    Returns:
+        list: [roll_deg, pitch_deg, yaw_deg] of the ROV, Z-Y-X, yaw from -180
+            to 180. The input, unchanged, for the flat mount.
+    """
+    if self.name == IMU_MOUNT_FLAT:
+      return [roll_deg, pitch_deg, yaw_deg]
+    board = self.rotationFromEuler(roll_deg, pitch_deg, yaw_deg)
+    # The ROV's rotation is the board's times the mount's inverse (its transpose)
+    rov = [[sum(board[i][k] * self.matrix[j][k] for k in range(3)) for j in range(3)] for i in range(3)]
+    pitch = math.degrees(math.asin(max(-1.0, min(1.0, -rov[2][0]))))
+    yaw = math.degrees(math.atan2(rov[1][0], rov[0][0]))
+    roll = math.degrees(math.atan2(rov[2][1], rov[2][2]))
+    return [roll, pitch, yaw]
+
+  def rates_to_rov(self, gyro_x, gyro_y, gyro_z):
+    """Turns the board's three gyro rates into the ROV's.
+
+    Args:
+        gyro_x, gyro_y, gyro_z (float): Rates about the board's X, Y and Z
+            arrows, deg/s.
+
+    Returns:
+        list: [roll_deg_per_sec, pitch_deg_per_sec, yaw_deg_per_sec] about the
+            ROV's forward, left and up axes.
+    """
+    gyro = (gyro_x, gyro_y, gyro_z)
+    return [sum(self.matrix[i][k] * gyro[k] for k in range(3)) for i in range(3)]
+
+  def rotationFromEuler(self, roll_deg, pitch_deg, yaw_deg):
+    # Rz(yaw) Ry(pitch) Rx(roll), the rotation the Teensy's angles came from
+    [cr, sr] = [math.cos(math.radians(roll_deg)), math.sin(math.radians(roll_deg))]
+    [cp, sp] = [math.cos(math.radians(pitch_deg)), math.sin(math.radians(pitch_deg))]
+    [cy, sy] = [math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))]
+    return [[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr]]
+
+
+#########################################
 # Node Class
 #########################################
 
@@ -600,13 +768,18 @@ class MateRovLinkNode:
   TN_MAX_AGE_MS = 500 # The navpose skips Teensy telemetry older than this
 
   # teleop_movement_enabled is the setting the Robots page looks for before it
-  # offers Teleop (NepiDeviceRBX-Controls.js), as in rbx_ardupilot.
+  # offers Teleop (NepiDeviceRBX-Controls.js), as in rbx_ardupilot. imu_mount
+  # says where the IMU board's X and Y arrows point in the ROV (ImuMount); one
+  # setting rather than one per arrow, so no order of changes passes through a
+  # mount whose arrows are parallel.
   CAP_SETTINGS = dict(
-    teleop_movement_enabled = {"type":"Discrete","name":"teleop_movement_enabled","options":["TRUE","FALSE"]}
+    teleop_movement_enabled = {"type":"Discrete","name":"teleop_movement_enabled","options":["TRUE","FALSE"]},
+    imu_mount = {"type":"Discrete","name":"imu_mount","options":IMU_MOUNT_OPTIONS}
   )
 
   FACTORY_SETTINGS = dict(
-    teleop_movement_enabled = {"type":"Discrete","name":"teleop_movement_enabled","value":"TRUE"}
+    teleop_movement_enabled = {"type":"Discrete","name":"teleop_movement_enabled","value":"TRUE"},
+    imu_mount = {"type":"Discrete","name":"imu_mount","value":IMU_MOUNT_FLAT}
   )
 
   FACTORY_SETTINGS_OVERRIDES = dict()
@@ -641,6 +814,8 @@ class MateRovLinkNode:
       self.rov_host = self.drv_dict['DEVICE_DICT']['host']
       self.status_port = self.drv_dict['DEVICE_DICT']['status_port']
       self.demand_port = self.drv_dict['DEVICE_DICT']['demand_port']
+      # The servos discovery launched SVX nodes for, from the status it heard
+      self.servo_names = sorted(self.drv_dict['DEVICE_DICT'].get('servo_names', []))
     except Exception as e:
       self.msg_if.pub_warn("Failed to load Device Dict " + str(e))
       nepi_sdk.signal_shutdown(self.node_name + ": Shutting down because no valid Device Dict")
@@ -649,8 +824,11 @@ class MateRovLinkNode:
     ##############################
     # Settings, stop and navpose state
     self.settings_dict = self.initSettingsDict()
+    self.imu_mount = ImuMount()
+    self.applyImuMount()
     self.stop_triggered = False
     self.state_ind_last = None # As of the last demand tick, to republish RBX info on a change
+    self.servo_names_seen = self.servo_names # As of the last demand tick, to warn when the Pi's list changes
     self.navpose_dict = copy.deepcopy(nepi_nav.BLANK_NAVPOSE_DICT)
 
     # Surge, sway, heave and yaw are commandable. With heave at 0 the Teensy's
@@ -738,6 +916,10 @@ class MateRovLinkNode:
     self.publish_info_pub = nepi_sdk.create_publisher(nepi_sdk.create_namespace(self.rbx_if.namespace, 'publish_info'),
                                                       Empty, queue_size = 1)
 
+    # Servo values from this ROV's servo nodes, as JSON {"name": ..., "value": ...}
+    nepi_sdk.create_subscriber(nepi_sdk.create_namespace(self.node_namespace, 'set_servo'), String,
+                               self.setServoCb, queue_size = 10)
+
     ## Start the demand tick
     nepi_sdk.start_timer_process(self.link.DEMAND_PERIOD_SEC, self.sendDemandCb)
 
@@ -798,9 +980,22 @@ class MateRovLinkNode:
       msg = (self.node_name + " Setting data " + setting_str + " is not valid")
       return success, msg, copy.deepcopy(self.settings_dict)
     self.settings_dict = nepi_controls.set_value(self.settings_dict, setting_name, setting_value)
+    if setting_name == 'imu_mount':
+      self.applyImuMount()
     success = True
     msg = (self.node_name + " UPDATED SETTINGS " + setting_str)
     return success, msg, copy.deepcopy(self.settings_dict)
+
+  def applyImuMount(self):
+    # The navpose reads self.imu_mount from its own timer, so it is replaced
+    # whole, never changed in place. nepi_controls keeps a Selection to one of
+    # its options, so the ValueError path is only a guard.
+    name = self.getSettingSelection('imu_mount')
+    try:
+      self.imu_mount = ImuMount(name)
+      self.msg_if.pub_info("IMU mount: " + str(name))
+    except ValueError as e:
+      self.msg_if.pub_warn("Kept IMU mount " + self.imu_mount.name + ": " + str(e))
 
   ##########################
   # RBX Interface Functions
@@ -867,12 +1062,25 @@ class MateRovLinkNode:
     tn_time = nepi_utils.get_time() - tn_age_ms / 1000.0
     self.navpose_dict['has_depth'] = True
     self.navpose_dict['time_depth'] = tn_time
+    self.navpose_dict['frame_depth'] = 'DEPTH' # Below the surface, not the blank dict's MSL
     self.navpose_dict['depth_m'] = float(tn['depth_m'])
+    self.navpose_dict['depth_m_per_sec'] = float(tn['depth_m_s'])
+    # Orientation and rates in the ROV's frame, through the imu_mount setting.
+    # $TNCTL's rate columns are the raw gyro axes under the sketch's own names:
+    # yaw_deg_s is gyro X, pitch_deg_s gyro Y, roll_deg_s gyro Z
+    # (new_ctl.ino:387-389), names that fit only a board with X vertical.
+    imu_mount = self.imu_mount
+    [roll, pitch, yaw] = imu_mount.orientation_to_rov(float(tn['roll_deg']), float(tn['pitch_deg']), float(tn['yaw_deg']))
+    [roll_rate, pitch_rate, yaw_rate] = imu_mount.rates_to_rov(float(tn['yaw_deg_s']), float(tn['pitch_deg_s']),
+                                                               float(tn['roll_deg_s']))
     self.navpose_dict['has_orientation'] = True
     self.navpose_dict['time_orientation'] = tn_time
-    self.navpose_dict['roll_deg'] = float(tn['roll_deg'])
-    self.navpose_dict['pitch_deg'] = float(tn['pitch_deg'])
-    self.navpose_dict['yaw_deg'] = float(tn['yaw_deg'])
+    self.navpose_dict['roll_deg'] = roll
+    self.navpose_dict['pitch_deg'] = pitch
+    self.navpose_dict['yaw_deg'] = yaw
+    self.navpose_dict['roll_deg_per_sec'] = roll_rate
+    self.navpose_dict['pitch_deg_per_sec'] = pitch_rate
+    self.navpose_dict['yaw_deg_per_sec'] = yaw_rate
     return self.navpose_dict
 
   #######################
@@ -894,13 +1102,34 @@ class MateRovLinkNode:
 
   def sendDemandCb(self, timer):
     # One demand per tick, decided by the link's demand rule, then the link
-    # state for the hold process, and the RBX info when the state changed.
+    # state for the hold process and the servo nodes, and the RBX info when
+    # the state changed.
     self.link.send_demand()
-    self.link_status_pub.publish(String(data = json.dumps(self.link.get_health())))
+    health = self.link.get_health()
+    self.link_status_pub.publish(String(data = json.dumps(health)))
     state_ind = self.getStateInd()
     if state_ind != self.state_ind_last:
       self.state_ind_last = state_ind
       self.publish_info_pub.publish(Empty())
+    # Servo nodes exist only for the servos the Pi listed when discovery
+    # launched this node, so say so when the Pi's list changes
+    servo_names = sorted(health['servos'].keys())
+    if health['link_up'] and servo_names != self.servo_names_seen:
+      self.servo_names_seen = servo_names
+      if servo_names != self.servo_names:
+        self.msg_if.pub_warn("The ROV Pi now lists servos " + str(servo_names) + ", but servo nodes run for " +
+                             str(self.servo_names) + ". Disable and enable the driver to match them.")
+
+  def setServoCb(self, msg):
+    # One servo node's value. A refusal (pilot mode, unknown name) is logged,
+    # at most once per 5 s for each message.
+    try:
+      request = json.loads(msg.data)
+      [success, text] = self.link.set_servo(request['name'], request['value'])
+    except Exception as e:
+      [success, text] = [False, "Bad set_servo message " + str(msg.data) + ": " + str(e)]
+    if not success:
+      self.msg_if.pub_warn(text, throttle_s = 5.0)
 
   #######################
   # Node Cleanup Function

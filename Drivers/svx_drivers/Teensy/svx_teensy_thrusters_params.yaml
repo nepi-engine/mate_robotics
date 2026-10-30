@@ -1,7 +1,7 @@
 driver:
   pkg_name: SVX_TEENSY_THRUSTERS
   display_name: Teensy Thrusters and Servos (Blue Robotics ESC)
-  description: Driver for a PJRC Teensy 4.1 running the teensy_thrusters firmware (mate_robotics Firmware/teensy_thrusters), which generates the pulses for Blue Robotics Basic ESCs, each driving one T200 thruster, and for up to four hobby servos. Each Teensy is found over USB serial and confirmed by the firmware's identify reply. The devices option picks the parts, the way the ZED driver's data_products option does. Thrusters are one motors device with one motor per thruster. Servos get one SVX servo device per servo, each with its own calibration in its Device Settings panel. Nothing reports back (ESCs, thrusters and servos are all one-way), so status shows commanded values only.
+  description: Driver for a PJRC Teensy 4.1 running the teensy_thrusters firmware (mate_robotics Firmware/teensy_thrusters), which generates the pulses for Blue Robotics Basic ESCs, each driving one T200 thruster, and for up to four hobby servos, and reads a Blue Robotics Bar02 or Bar30 depth sensor wired to the Teensy's I2C. Each Teensy is found over USB serial and confirmed by the firmware's identify reply. The devices option picks the parts, any combination of them, the way the ZED driver's data_products option does. Thrusters are one motors device with one motor per thruster. Servos get one SVX servo device per servo, each with its own calibration in its Device Settings panel. The depth sensor is one NavPose device reporting depth, plus pressure and water temperature topics. Nothing reports back from the ESCs, thrusters or servos (they are one-way), so their status shows commanded values only.
   type: SVX
   group_id: None
   NODE_DICT:
@@ -16,14 +16,54 @@ driver:
     process: CALL
     OPTIONS:
       devices:
-        type: Selection
-        description: 'Which parts of each Teensy NEPI drives. thrusters: one motors device for the ESCs (the options from esc_model to custom_deadband_us). servos: servo_count servo devices. thrusters,servos: both. A part that is not selected gets no node: deselected thrusters stay at the stop pulse the firmware outputs from boot, and deselected servos stay off (limp). Servos need firmware protocol 1.1 or later. Changing this starts or stops only the parts that changed.'
+        type: Selections
+        description: 'Which parts of each Teensy NEPI drives; select any combination. thrusters: one motors device for the ESCs (the options from esc_model to custom_deadband_us). servos: servo_count servo devices. depth_sensor: one NavPose device for a Bar depth sensor on the Teensy''s I2C (the depth_* options, fluid_density_kg_m3 and surface_pressure_mbar). Default thrusters and servos. A part that is not selected gets no node: deselected thrusters stay at the stop pulse the firmware outputs from boot, deselected servos stay off (limp), and a deselected depth sensor is not read. Servos need firmware protocol 1.1 or later and the depth sensor 1.2 or later. Changing this starts or stops only the parts that changed. To run nothing, disable the driver: the last selected part cannot be deselected.'
         options:
           - 'thrusters'
           - 'servos'
-          - 'thrusters,servos'
-        default: 'thrusters,servos'
-        value: 'thrusters,servos'
+          - 'depth_sensor'
+        default:
+          - 'thrusters'
+          - 'servos'
+        value:
+          - 'thrusters'
+          - 'servos'
+      depth_model:
+        type: Selection
+        description: 'Depth sensor only: which Bar sensor is wired. Default BlueRobotics Bar02 (MS5837-02BA), 0 to 10 m and as fine as 0.16 mm. BlueRobotics Bar30 (MS5837-30BA) reads 0 to about 300 m and as fine as 2 mm. The two use different conversion math, and running the wrong one reads about 20 times too high or too low; neither chip can report which it is (Docs/npx/bluerobotics_bar_depth_sensor.md). Check the part label. At startup the node compares its first reading with surface_pressure_mbar and logs a warning when the other model''s math fits better. Changing this restarts the depth sensor node only.'
+        options:
+          - 'BlueRobotics Bar02 (MS5837-02BA)'
+          - 'BlueRobotics Bar30 (MS5837-30BA)'
+        default: 'BlueRobotics Bar02 (MS5837-02BA)'
+        value: 'BlueRobotics Bar02 (MS5837-02BA)'
+      depth_osr:
+        type: Selection
+        description: 'Depth sensor only: the oversampling ratio of each pressure and temperature conversion. Higher is quieter but slower, and keeps the sensor converting more of the time, which warms it. Default 1024, about 0.4 mm of fresh water RMS noise on a Bar02 (5.5 mm on a Bar30) for 2.3 ms per conversion; ArduPilot uses 1024 to limit self-heating. 8192 is the quietest (0.16 mm on a Bar02) at 18 ms per conversion. The Teensy samples at most 50 times a second whatever the ratio (Docs/npx/bluerobotics_bar_depth_sensor.md, Oversampling and read rate). Changing this restarts the depth sensor node only.'
+        options:
+          - '256'
+          - '512'
+          - '1024'
+          - '2048'
+          - '4096'
+          - '8192'
+        default: '1024'
+        value: '1024'
+      fluid_density_kg_m3:
+        type: Float
+        description: 'Depth sensor only: the density of the water, 950-1100 kg/m3. Default 997, fresh water; sea water is 1029. Depth is the pressure above surface_pressure_mbar divided by density times gravity, so a fresh-water setting in the sea reads about 3% deep. Changing this restarts the depth sensor node only.'
+        options:
+          - '950.0'
+          - '1100.0'
+        default: '997.0'
+        value: '997.0'
+      surface_pressure_mbar:
+        type: Float
+        description: 'Depth sensor only: the air pressure at the water surface, 700-1100 mbar, which is depth 0. Default 1013.25, standard sea-level pressure. Weather moves it by about 30 mbar, which is 30 cm of depth, and altitude by about 120 mbar per 1000 m. For accurate depth, measure it with the sensor in air at the surface and enter that: the depth node logs its first reading in mbar when it starts, and publishes pressure continuously on its pressure topic in pascals (divide by 100 for mbar). It also marks the sensor''s own height as depth 0, so depth is the sensor''s depth, not the vehicle''s. Changing this restarts the depth sensor node only.'
+        options:
+          - '700.0'
+          - '1100.0'
+        default: '1013.25'
+        value: '1013.25'
       servo_count:
         type: Int
         description: 'Servos only: how many servos are wired, 1-4. Default 1. Servos take the servo pins in order: servo 0 on pin 10, servo 1 on 11, servo 2 on 12, servo 3 on 14 (Firmware/teensy_thrusters/PROTOCOL.md section 4). One servo device is launched per servo; nothing can detect whether a servo is plugged in, so set this to what is actually wired. Each servo is calibrated in its own Device Settings panel (pulse widths and degree range), because those describe the servo, not the board. Raising or lowering it starts or stops only the servos that changed.'

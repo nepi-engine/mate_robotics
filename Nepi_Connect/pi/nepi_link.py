@@ -30,7 +30,10 @@
 # on NEPI's Robots page, and a demand older than 250 ms means neutral. RY
 # carries NEPI's heave; while heave is 0, RY is 0 and the Teensy's own depth
 # hold keeps the depth, the same as when the pilot centers the stick. Buttons,
-# the D-pad, RX and LB pass through, so the pilot can still work tools. NEPI
+# the D-pad, RX and LB pass through, so the pilot can still work tools, except
+# the inputs named as NEPI servos (NEPI_SERVO_n_*, e.g. the claw's): in NEPI
+# control those carry the demand's servo values, and the pilot's own input
+# wins whenever it is off neutral, for that input only. NEPI
 # control ends when the pilot presses RB again, when the pilot moves any
 # movement input past NEPI_TAKEOVER_FRACTION of its travel (the safety exit),
 # when NEPI sends active false, or after 2 s with no accepted demand. NEPI
@@ -79,6 +82,23 @@ EVENT_SLOTS = {'ABS_X': LX_SLOT, 'ABS_Y': LY_SLOT, 'ABS_RX': RX_SLOT, 'ABS_RY': 
 STICK_DEADZONE = 3000 # JOYSTICK_DEADZONE_CONST, new_ctl.ino:29
 STICK_MAX = 32767 # JOYSTICK_MAGNITUDE, new_ctl.ino:27
 MIN_DEMAND = 0.01 # Smaller demands map to 0 (LINK_PROTOCOL "Dead-zone mapping")
+
+# Every input slot by its gamepad_map event name (main.py:39-58)
+GAMEPAD_SLOTS = {'ABS_X': 0, 'ABS_Y': 1, 'ABS_RX': 2, 'ABS_RY': 3, 'BTN_THUMBL': 4, 'BTN_THUMBR': 5,
+                 'ABS_HAT0X': 6, 'ABS_HAT0Y': 7, 'BTN_SOUTH': 8, 'BTN_EAST': 9, 'BTN_NORTH': 10, 'BTN_WEST': 11,
+                 'BTN_TL': 12, 'BTN_TR': 13, 'ABS_Z': 14, 'ABS_RZ': 15, 'BTN_START': 16, 'BTN_SELECT': 17}
+
+# Inputs a NEPI servo may use (NEPI_SERVO_n_INPUT), each with its default
+# [min, neutral, max, dead zone]. Not offered: the movement inputs NEPI
+# already owns, LB (slow mode) and RB (the NEPI control button). The RX dead
+# zone is 2999 because the Teensy zeroes |RX| < 3000 (new_ctl.ino:570).
+SERVO_INPUTS = {'ABS_RX': [-STICK_MAX, 0, STICK_MAX, STICK_DEADZONE - 1],
+                'ABS_HAT0X': [-1, 0, 1, 0], 'ABS_HAT0Y': [-1, 0, 1, 0],
+                'BTN_THUMBL': [0, 0, 1, 0], 'BTN_THUMBR': [0, 0, 1, 0],
+                'BTN_SOUTH': [0, 0, 1, 0], 'BTN_EAST': [0, 0, 1, 0], 'BTN_NORTH': [0, 0, 1, 0], 'BTN_WEST': [0, 0, 1, 0],
+                'BTN_START': [0, 0, 1, 0], 'BTN_SELECT': [0, 0, 1, 0]}
+MAX_SERVOS = 4 # NEPI_SERVO_1_* to NEPI_SERVO_4_*; more would not fit the status
+SERVO_NAME = re.compile(r'^[a-z][a-z0-9_]{0,15}$')
 
 # LINK_PROTOCOL "Pi Configuration" defaults
 DEFAULT_CONFIG = {
@@ -172,6 +192,32 @@ def trigger_value(demand, deadzone, maximum):
         return 0
     value = int(deadzone + (demand - MIN_DEMAND) / (1.0 - MIN_DEMAND) * (maximum - deadzone) + 0.5)
     return min(value, maximum)
+
+def servo_value(demand, low, neutral, high):
+    """Map a servo demand onto its input's raw range.
+
+    0 is the input's neutral, 1 its high end and -1 its low end, each half
+    scaled on its own, so a button (0, 0, 1) reads any negative demand as
+    released. Rounds half away from neutral, so a D-pad (-1, 0, 1) is pressed
+    for any demand of at least 0.5 either way.
+
+    Args:
+        demand (float): -1 to 1.
+        low (int): NEPI_SERVO_n_MIN.
+        neutral (int): NEPI_SERVO_n_NEUTRAL.
+        high (int): NEPI_SERVO_n_MAX.
+
+    Returns:
+        int: Input value, low to high.
+    """
+    if demand >= 0:
+        offset = demand * (high - neutral)
+    else:
+        offset = demand * (neutral - low)
+    steps = int(math.floor(abs(offset) + 0.5))
+    if offset < 0:
+        steps = -steps
+    return max(low, min(high, neutral + steps))
 
 
 #**********************
@@ -343,11 +389,54 @@ def validate_config(config):
     if settings['takeover_stick'] <= STICK_DEADZONE or settings['takeover_trigger'] <= deadzone:
         return None, ('NEPI_TAKEOVER_FRACTION must put the takeover point past the stick and trigger '
                       'dead zones: link off')
+    [servos, msg] = validateServos(config)
+    if servos is None:
+        return None, msg
+    settings['servos'] = servos
+    servos_msg = ', no servos'
+    if len(servos) > 0:
+        servos_msg = ', servos ' + ', '.join(servo['name'] + ' on ' + servo['input'] for servo in servos)
     return settings, ('On: NEPI ' + settings['NEPI_LAN_IP'] + ', status to UDP ' + str(settings['NEPI_STATUS_UDP_PORT']) +
                       ', demands on UDP ' + str(settings['NEPI_DEMAND_UDP_PORT']) +
                       ', triggers ' + str(deadzone) + ' to ' + str(maximum) +
                       ', takeover at stick ' + str(settings['takeover_stick']) +
-                      ' and trigger ' + str(settings['takeover_trigger']))
+                      ' and trigger ' + str(settings['takeover_trigger']) + servos_msg)
+
+def validateServos(config):
+    # NEPI_SERVO_1_* to NEPI_SERVO_<MAX_SERVOS>_*, as [servos (list) or None, msg].
+    # A number whose NAME is missing or empty is unused.
+    servos = []
+    for number in range(1, MAX_SERVOS + 1):
+        prefix = 'NEPI_SERVO_' + str(number) + '_'
+        name = config.get(prefix + 'NAME')
+        if name is None or name == '':
+            continue
+        if not isinstance(name, str) or not SERVO_NAME.match(name):
+            return None, (prefix + 'NAME must be 1 to 16 lowercase letters, digits or _, starting with a letter: '
+                          'link off')
+        event = config.get(prefix + 'INPUT')
+        if not isinstance(event, str) or event not in SERVO_INPUTS:
+            return None, prefix + 'INPUT must be one of ' + ', '.join(sorted(SERVO_INPUTS)) + ': link off'
+        values = dict()
+        for [key, default] in zip(['MIN', 'NEUTRAL', 'MAX', 'DEADZONE'], SERVO_INPUTS[event]):
+            value = config.get(prefix + key)
+            if value is None:
+                value = default
+            if not isInteger(value):
+                return None, prefix + key + ' must be an integer: link off'
+            values[key] = value
+        if (not values['MIN'] <= values['NEUTRAL'] <= values['MAX'] or values['MIN'] == values['MAX'] or
+                values['DEADZONE'] < 0):
+            return None, (prefix + 'MIN, NEUTRAL, MAX and DEADZONE need MIN <= NEUTRAL <= MAX, MIN < MAX and '
+                          'DEADZONE >= 0: link off')
+        for other in servos:
+            if other['name'] == name:
+                return None, prefix + 'NAME ' + name + ' is already used: link off'
+            if other['input'] == event:
+                return None, prefix + 'INPUT ' + event + ' is already used: link off'
+        servos.append(dict(name = name, input = event, slot = GAMEPAD_SLOTS[event], min = values['MIN'],
+                           neutral = values['NEUTRAL'], max = values['MAX'], deadzone = values['DEADZONE']))
+    return servos, 'Servos valid'
 
 
 #**********************
@@ -375,8 +464,8 @@ def parse_demand(datagram, source_ip, nepi_ip):
 
     Returns:
         list: [demand (dict or None), msg (str)]. demand holds seq, active,
-            surge, sway, heave and yaw, or is None when the datagram must be
-            dropped, with the reason in msg.
+            surge, sway, heave, yaw and servos (name to value), or is None
+            when the datagram must be dropped, with the reason in msg.
     """
     if source_ip != nepi_ip:
         return None, 'Demand from ' + str(source_ip) + ' dropped: only ' + nepi_ip + ' may send demands'
@@ -408,8 +497,17 @@ def parse_demand(datagram, source_ip, nepi_ip):
     heave = message.get('heave', 0.0)
     if not isNumber(heave) or heave < -1 or heave > 1:
         return None, 'Demand dropped: heave must be a finite number from -1 to 1'
+    # servos joined version 1 later too: no field means no servo values. Names
+    # this Pi has no servo for are kept and ignored by the merge.
+    servos = message.get('servos', dict())
+    if not isinstance(servos, dict):
+        return None, 'Demand dropped: servos must be an object'
+    for value in servos.values():
+        if not isNumber(value) or value < -1 or value > 1:
+            return None, 'Demand dropped: each servos value must be a finite number from -1 to 1'
     demand = dict(seq = seq, active = message['active'], surge = float(message['surge']),
-                  sway = float(message['sway']), heave = float(heave), yaw = float(message['yaw']))
+                  sway = float(message['sway']), heave = float(heave), yaw = float(message['yaw']),
+                  servos = dict((name, float(value)) for (name, value) in servos.items()))
     return demand, 'Accepted'
 
 def parse_teensy_line(line):
@@ -510,6 +608,7 @@ class NepiLink(object):
         self.pilot_sway = False
         self.pilot_yaw = False
         self.pilot_depth = False
+        self.servo_pilot = dict() # Servo name to whether the pilot's own input is off neutral
         self.out_lx = 0
         self.out_ly = 0
         self.out_ry = 0
@@ -665,7 +764,21 @@ class NepiLink(object):
             out = list(pilot)
             for slot in [LY_SLOT, LX_SLOT, RY_SLOT, LT_SLOT, RT_SLOT]:
                 out[slot] = 0
-            if self.demandFreshLocked(now):
+            fresh = self.demandFreshLocked(now)
+            # A servo input the pilot holds off neutral stays the pilot's.
+            # Otherwise it carries NEPI's value, or neutral while the demand
+            # is stale or has no value for it.
+            for servo in settings['servos']:
+                if self.servo_pilot[servo['name']]:
+                    continue
+                value = None
+                if fresh:
+                    value = self.demand['servos'].get(servo['name'])
+                if value is None:
+                    out[servo['slot']] = servo['neutral']
+                else:
+                    out[servo['slot']] = servo_value(value, servo['min'], servo['neutral'], servo['max'])
+            if fresh:
                 demand = self.demand
                 out[LY_SLOT] = stick_value(clampDemand(demand['surge'], settings['NEPI_MAX_SURGE']) *
                                            settings['NEPI_SURGE_SIGN'])
@@ -695,6 +808,8 @@ class NepiLink(object):
         self.pilot_sway = abs(pilot[LX_SLOT]) >= STICK_DEADZONE
         self.pilot_yaw = pilot[LT_SLOT] >= deadzone or pilot[RT_SLOT] >= deadzone
         self.pilot_depth = abs(pilot[RY_SLOT]) >= STICK_DEADZONE
+        for servo in settings['servos']:
+            self.servo_pilot[servo['name']] = abs(pilot[servo['slot']] - servo['neutral']) > servo['deadzone']
         # Slow mode, with the Teensy's "button available" rule (new_ctl.ino:364-379)
         if pilot[LB_SLOT]:
             if self.slow_btn_avl:
@@ -864,6 +979,9 @@ class NepiLink(object):
         tn = None
         if self.tn is not None:
             tn = dict(self.tn)
+        # Each NEPI servo by name: whether the pilot holds its input
+        servos = dict((servo['name'], self.servo_pilot.get(servo['name'], False))
+                      for servo in self.settings['servos'])
         # The out_* ranges are part of the contract, so a pilot value past
         # them (a controller or config mismatch) is reported at the limit.
         return dict(v = 1, type = 'status', seq = self.status_seq, t = round(self.wall_clock(), 3),
@@ -875,7 +993,8 @@ class NepiLink(object):
                     out_lt = clampInt(self.out_lt, 0, trigger_max), out_rt = clampInt(self.out_rt, 0, trigger_max),
                     demand_seq = self.demand_seq, demand_age_ms = ageMs(now, self.demand_time),
                     demand_bad = self.demand_bad,
-                    tn = tn, tn_age_ms = ageMs(now, self.tn_time), tn_count = self.tn_count, tn_bad = self.tn_bad)
+                    tn = tn, tn_age_ms = ageMs(now, self.tn_time), tn_count = self.tn_count, tn_bad = self.tn_bad,
+                    servos = servos)
 
     def nextStatusDatagram(self):
         with self.lock:

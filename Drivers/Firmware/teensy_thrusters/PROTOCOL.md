@@ -1,17 +1,22 @@
-# teensy_thrusters: Pi-to-Teensy Protocol, Version 1.1
+# teensy_thrusters: Pi-to-Teensy Protocol, Version 1.2
 
-This document specifies the serial protocol between the NEPI device (a Raspberry Pi 5) and a PJRC Teensy 4.1 that generates the servo-style pulses for Blue Robotics Basic ESCs (BESC30-R3), each driving one T200 thruster, and for up to four hobby servos. These files implement it and are meant to be bench-tested together:
+This document specifies the serial protocol between the NEPI device (a Raspberry Pi 5) and a PJRC Teensy 4.1 that generates the servo-style pulses for Blue Robotics Basic ESCs (BESC30-R3), each driving one T200 thruster, and for up to four hobby servos, and that reads a Blue Robotics Bar02 or Bar30 depth sensor. These files implement it and are meant to be bench-tested together:
 
 | Side | File |
 |---|---|
 | Teensy firmware | `Firmware/teensy_thrusters/teensy_thrusters.ino` |
-| NEPI discovery | `Drivers/svx_drivers/svx_teensy_thrusters_discovery.py` |
-| NEPI thruster node | `Drivers/svx_drivers/svx_teensy_thrusters_node.py` |
-| NEPI servo node (one per servo) | `Drivers/svx_drivers/svx_teensy_thrusters_servo_node.py` |
+| NEPI discovery | `Drivers/svx_drivers/Teensy/svx_teensy_thrusters_discovery.py` |
+| NEPI thruster node | `Drivers/svx_drivers/Teensy/svx_teensy_thrusters_node.py` |
+| NEPI servo node (one per servo) | `Drivers/svx_drivers/Teensy/svx_teensy_thrusters_servo_node.py` |
+| NEPI depth sensor node | `Drivers/svx_drivers/Teensy/svx_teensy_thrusters_depth_node.py` |
 
-Hardware facts used here come from `Docs/tbd/pjrc_teensy_4_1.md` (the Teensy), `Docs/Motors/bluerobotics_basic_esc.md` (the ESC), `Docs/Motors/bluerobotics_t200_thruster.md` (the thruster) and `Docs/svx/axon_max_mk2_servo.md` (the servo).
+How to compile the firmware and flash it from the NEPI device is in `FLASHING.md` in this folder.
+
+Hardware facts used here come from `Docs/tbd/pjrc_teensy_4_1.md` (the Teensy), `Docs/Motors/bluerobotics_basic_esc.md` (the ESC), `Docs/Motors/bluerobotics_t200_thruster.md` (the thruster), `Docs/svx/axon_max_mk2_servo.md` (the servo) and `Docs/npx/bluerobotics_bar_depth_sensor.md` (the depth sensor, "the Bar doc").
 
 **What 1.1 adds to 1.0.** Four servo channels and the commands that drive them (`SC`, `SL`, `SS`, `SO`, `SV`, sections 6.7 to 6.11), one field appended to the `ID` reply, and the rules for several host processes sharing the port (section 2.1). Every 1.0 command, reply and behavior is unchanged, so a 1.0 host still drives the thrusters of a 1.1 board. This specification covers every item in the Teensy document's "To Be Defined" list; section 12 maps each item to the section that covers it.
+
+**What 1.2 adds to 1.1.** A Bar depth sensor on the Teensy's I2C port and the three commands that read it (`DC`, `DV`, `DP`, sections 6.12 to 6.14). The firmware does not touch I2C until a host sends `DC`, so a host that never does gets exactly the 1.1 behavior, and every 1.1 command, reply and behavior is unchanged. The `ID` reply is unchanged too: a host knows the depth commands exist from the protocol version.
 
 ## 1. Why this protocol exists
 
@@ -30,7 +35,7 @@ The NEPI driver runs one process for the thrusters and one per servo, and they a
 
 - **One transaction at a time.** A host holds an exclusive advisory lock (`flock(LOCK_EX)`) on its open port from just before it writes a request until it has read the reply or given up. No process opens the port with pySerial's `exclusive=True` while it runs, because that holds the same lock for the life of the open and would lock every other process out.
 - **Open under the lock too.** Opening a tty with pySerial flushes its input queue, and that queue is shared by every process holding the port, so a process that opens the port while another is mid-transaction throws that process's reply away. The nodes therefore take the same lock (on a short-lived second descriptor) around the open itself.
-- **Match the reply to the request.** A reply that arrives after its requester gave up can be read by the next process. Every reply names its command (`OK,<cmd>`, `ER,<code>,<cmd>`, `ID`, `ST`, `SV`), so a host discards any reply that does not name the command it sent and keeps reading until its own timeout.
+- **Match the reply to the request.** A reply that arrives after its requester gave up can be read by the next process. Every reply names its command (`OK,<cmd>`, `ER,<code>,<cmd>`, `ID`, `ST`, `SV`, `DV`, `DP`), so a host discards any reply that does not name the command it sent and keeps reading until its own timeout.
 - **DTR is shared.** DTR stays asserted while any process holds the port open and falls only when the last one closes it (section 9). One process exiting therefore does not stop the thrusters through DTR; the thruster watchdog does that within `watchdog_ms` if the thruster process was the one that died.
 
 ## 3. Framing
@@ -100,6 +105,15 @@ Each servo pin is the only PWM pin on its own QuadTimer channel, and none is on 
 
 The servos are slow, non-thrust actuators, so a servo held at its last position is not a runaway the way a thruster held at its last command is. That is why servos have no watchdog of their own.
 
+### 4.2 Depth sensor port
+
+The Bar depth sensor goes on `Wire`, I2C port 0: SDA on pin 18, SCL on pin 19. The sensor's address, 0x76, is fixed, so it is the only Bar sensor on that bus (Bar doc, "Bus and address").
+
+- **Why `Wire`.** Section 4 already keeps the thruster and servo outputs off pins 18 and 19, so `Wire` costs no output this firmware uses. Pin 14's QuadTimer3 module also owns 18 and 19, but as separate channels (section 4.1). It is also where the MATE bench already wired its Bar02 (`Nepi_Connect/BENCH_SETUP_PLAN.md`, "Bar02 wired to the Teensy").
+- **Bus speed.** 100 kHz, the `Wire` default and the speed Blue Robotics' Arduino library runs at. The sensor allows 400 kHz, but the Bar sensor's cable is about 30 cm and its board has no pull-ups (Bar doc), so the slower edge rate leaves more margin.
+- **Untouched until asked.** `Wire.begin()` runs on the first accepted `DC` with a non-zero ratio, never at boot. Until then pins 18 and 19 stay inputs, as in 1.1.
+- **One more 0x76 part.** The Adafruit MS8607 in this kit also answers at 0x76 (Bar doc, "Address conflict"). On this bus it would fail the calibration check and read as `BAD_PROM` (section 6.13); it belongs on another bus.
+
 ## 5. Configuration and its defaults
 
 The firmware holds one configuration in RAM. Nothing is stored in EEPROM, so every boot starts from these defaults, and the host sends `CF` every time it connects.
@@ -132,6 +146,17 @@ Also held in RAM only. Every servo node sends `SC` and its own `SL` when it conn
 
 Rules: `min_us < max_us`, and `max_us <= 1,000,000 / servo_rate_hz - 100`. That rule only binds at 333 Hz (3003 µs frame), where 2500 µs still fits. The 500 to 2500 µs hard limits are the Axon MAX MK2's range (servo doc) and the common hobby-servo range. 50 Hz is the default because a servo that "works with" standard robot-controller ports gets 50 Hz pulses (servo doc); faster rates suit digital servos rated for them, such as the DS3235's 50 to 330 Hz. The 1000 to 2000 µs boot range is deliberately narrow, so that a servo commanded before its node has pushed its calibration cannot be driven into its end stops.
 
+### 5.2 Depth sensor configuration and its defaults
+
+Also held in RAM only. The depth sensor node sends `DC` when it connects.
+
+| Setting | Boot default | Allowed by `DC` |
+|---|---|---|
+| sampling | off | on, at one ratio below; `0` turns it off |
+| oversampling ratio (OSR) | 1024 once turned on | 256, 512, 1024, 2048, 4096 or 8192 |
+
+The six ratios are the sensor's own, and a higher one is quieter but slower (Bar doc, "Conversion timing"). The firmware waits each conversion's maximum time from the datasheet before reading it, using the Bar30's figure because it is the longer of the two models, plus about 5%: 0.65, 1.25, 2.4, 4.8, 9.5 or 19 ms. A sample is one pressure (D1) and one temperature (D2) conversion. A new sample starts at most every 20 ms, so the firmware samples at most 50 times a second at any ratio. That also limits how much of the time the sensor spends converting, which warms it (Bar doc, "Self-heating at high OSR").
+
 ## 6. Commands
 
 Each command lists its request, its success reply and its specific errors. Section 7 covers error replies in general.
@@ -141,7 +166,7 @@ Each command lists its request, its success reply and its specific errors. Secti
 ```
 request:  $ID*hh
 reply:    $ID,teensy_thrusters,<protocol>,<firmware>,<thrusters>,<servo_channel>,<serial>,<servo_count>*hh
-example:  $ID,teensy_thrusters,1.1,1.1.0,8,8,12345670,4*hh
+example:  $ID,teensy_thrusters,1.2,1.2.0,8,8,12345670,4*hh
 ```
 
 | Field | Meaning |
@@ -287,6 +312,57 @@ example:  $SV,1,50,HOLD,1500,500,2500,0,1000,2000,0,1000,2000,0,1000,2000*hh
 
 `SV` changes no state.
 
+### 6.12 `DC`: depth sensor configure
+
+```
+request:  $DC,<osr>*hh       osr: 256, 512, 1024, 2048, 4096 or 8192; 0 turns sampling off
+example:  $DC,1024*2C
+reply:    $OK,DC*hh
+```
+
+A non-zero `<osr>` starts the firmware sampling the depth sensor in the background at that ratio (section 5.2); the first `DC` also starts `Wire` (section 4.2). `0` stops sampling. A ratio that is not one of the six, and not `0`, is rejected with `RANGE` and nothing changes. An accepted `DC`:
+
+1. from off, moves the state to `SEARCHING`, and the sensor is probed on the next pass of the firmware's loop;
+2. with sampling already on, changes only the ratio, which applies from the next conversion. A conversion in progress keeps its own wait, and mixing ratios within one sample is harmless, because the ratio sets the resolution of D1 and D2, not their scale;
+3. sets the `dcfg` flag that `DV` reports.
+
+`DC` is accepted while DTR is low. It never touches the thrusters, the servos or the watchdog.
+
+**Probing.** While the state is `SEARCHING` or `BAD_PROM`, the firmware sends the sensor its reset command, waits 10 ms as Blue Robotics' libraries do, and reads the seven calibration words (Bar doc, "Startup and Initialization"). A sensor passes when the words' CRC-4 matches the top four bits of word 0 and no coefficient (words 1 to 6) is 0 or 0xFFFF, since an all-zero PROM also passes the CRC. Passing moves the state to `OK` and counts one detection. If nothing acknowledges the reset, the state is `SEARCHING`; if something does but its words fail, `BAD_PROM`. Either way the next probe is one second later.
+
+**Sampling.** In `OK`, each sample is: convert D1, wait, read it; convert D2, wait, read it. A read that fails, or that returns 0 (the sensor's sign of a read that was early or overlapped a conversion), discards the sample, counts one error, and waits one full 8192-ratio conversion before the next command, in case the failed command started a conversion. Three failures in a row move the state back to `SEARCHING`, which re-probes once a second.
+
+### 6.13 `DV`: depth sensor value
+
+```
+request:  $DV*12
+reply:    $DV,<dcfg>,<state>,<osr>,<detects>,<seq>,<age_ms>,<d1>,<d2>,<errors>*hh
+example:  $DV,1,OK,1024,1,1532,12,6465444,8077636,0*hh
+```
+
+| Field | Meaning |
+|---|---|
+| `<dcfg>` | `1` once a `DC` has been accepted since boot, else `0`. **`0` while the depth sensor node believes it configured the board means the Teensy rebooted**: sampling is off, and the node sends `DC` again. |
+| `<state>` | `OFF` (no `DC` yet, or the last one was `0`), `SEARCHING` (nothing acknowledges at 0x76, or not probed yet), `BAD_PROM` (something acknowledges but its calibration words fail the check) or `OK` (sampling). |
+| `<osr>` | The ratio in force; `0` when `OFF`. |
+| `<detects>` | How many times a sensor has passed the probe since boot. It changes when a sensor is re-detected, which may be a different sensor, so the host reads `DP` again whenever it changes. |
+| `<seq>` | How many samples have completed since boot. The host tells a new sample from a repeat by this. Wraps at 2^32. |
+| `<age_ms>` | Milliseconds since the reported sample completed; `0` before the first sample. A sample is kept, and keeps ageing, through failed reads and a lost sensor, so a host must read `<state>` and `<age_ms>`, not just the values. |
+| `<d1>`, `<d2>` | The latest sample's raw 24-bit pressure (D1) and temperature (D2) readings; `0` before the first sample. |
+| `<errors>` | Failed reads while `OK` since boot (section 6.12, Sampling). Wraps at 2^32. |
+
+The values are raw because turning them into pressure and temperature needs the calibration words and the sensor model, and the model cannot be read from the chip (Bar doc, "Identification and Detection"). The host does the conversion with the Bar doc's first- and second-order formulas. `DV` changes no state.
+
+### 6.14 `DP`: depth sensor calibration
+
+```
+request:  $DP*14
+reply:    $DP,<detects>,<w0>,<w1>,<w2>,<w3>,<w4>,<w5>,<w6>*hh
+example:  $DP,1,32768,46372,43981,29059,27842,31553,28165*hh
+```
+
+The seven calibration words (decimal, 0 to 65535) read at the latest detection, and the `<detects>` count they belong to: word 0 holds the CRC and version bits, and words 1 to 6 are the coefficients C1 to C6 (Bar doc, "PROM layout"). The example carries the Bar02 datasheet coefficients, with the CRC they compute to (8) in word 0's top four bits. All zero before the first detection. A host pairs these words only with `DV` samples that report the same `<detects>`, so a sensor swapped between the two requests is never converted with the other sensor's calibration. `DP` changes no state.
+
 ## 7. Errors
 
 ```
@@ -302,7 +378,7 @@ $ER,<code>,<cmd>*hh
 | `OVERFLOW` | More than 120 characters without a line end. The firmware discards bytes up to the next `\n`, then replies once. |
 | `UNKNOWN` | Valid frame, unknown command. |
 | `FIELDS` | Wrong number of fields for the command. |
-| `RANGE` | A field outside its allowed range or rule (sections 5, 5.1, 6.2, 6.4, 6.7 to 6.10), including a servo number that does not exist. |
+| `RANGE` | A field outside its allowed range or rule (sections 5, 5.1, 6.2, 6.4, 6.7 to 6.10, 6.12), including a servo number that does not exist. |
 | `INACTIVE` | `SA` carried a value other than `stop_us` for an inactive channel. |
 | `ARMING` | `SA` during an arm hold. Expected while arming; the NEPI node treats it as state, not failure. |
 | `NO_HOST` | `SA` or `SS` while DTR is low. |
@@ -320,6 +396,8 @@ $ER,<code>,<cmd>*hh
 
 **Why the watchdog is the only stop.** The ESC stops by itself after roughly 0.3 s without pulses (ESC doc, derived from the BLHeli_S source). This firmware never stops pulsing, because it always holds `stop_us` at minimum, so that ESC behavior never fires while the firmware runs. When the Pi, the NEPI node or the USB link dies, the firmware watchdog is the only thing that stops the thrusters.
 
+**What the depth sensor can do to the watchdog: delay it, never stop it.** The firmware checks the watchdog, DTR and the arm hold first in every pass of its loop, and services the depth sensor last, one or two short I2C transactions at a time; it never waits for a conversion. A healthy transaction takes well under a millisecond at 100 kHz, and reading the calibration words about 2 ms. A faulty bus is bounded by the Teensy 4 `Wire` library, whose master calls give up after about 50 ms plus a 16 ms wait for the bus to go idle, with a bus-clearing attempt (`WireIMXRT.cpp`, unchanged for master transfers since 2023, so in Teensyduino 1.59). One loop pass can therefore be delayed by about 70 ms, which can postpone a watchdog trip by that much but cannot skip it. After three failures in a row the sensor is only re-probed once a second, so a dead bus costs at most one such delay a second. A delay never causes a false trip either: the queued `SA` frames are handled at the start of the next pass, before the watchdog is checked. Sampling is off until a host sends `DC`, so a board whose host never asks for depth runs exactly as in 1.1.
+
 **What the watchdog does not cover: a firmware hang.** The pulses are made by PWM hardware, which keeps outputting the last duty value even if the firmware's main loop stops. Version 1.0 does not enable the i.MX RT1062 hardware watchdog, so a hung firmware leaves the thrusters at their last command. The host detects this (no replies) and the NEPI node exits, but it cannot stop the pulses. The vehicle's power kill remains the stop for that case. Enabling the hardware watchdog is a listed follow-up.
 
 ## 9. Boot, connect and disconnect
@@ -330,7 +408,9 @@ $ER,<code>,<cmd>*hh
 
 **When the host connects** (DTR rises), nothing moves. The host sends `ID`, then `CF`, then `AR`, then starts its `SA` keepalive.
 
-**When DTR drops** (the last host process closed the port or died; section 2.1): every active channel goes to `stop_us`, any arm hold is cancelled, and the state becomes `IDLE`. Servos keep their pulses if `host_loss` is `HOLD` and go off if it is `LIMP`. While DTR stays low, `SA` and `SS` are rejected with `NO_HOST`; every other command is still answered. The configuration and the `cfg` and `scfg` flags are kept.
+**When DTR drops** (the last host process closed the port or died; section 2.1): every active channel goes to `stop_us`, any arm hold is cancelled, and the state becomes `IDLE`. Servos keep their pulses if `host_loss` is `HOLD` and go off if it is `LIMP`. Depth sampling carries on, since reading a sensor moves nothing. While DTR stays low, `SA` and `SS` are rejected with `NO_HOST`; every other command is still answered. The configuration and the `cfg`, `scfg` and `dcfg` flags are kept.
+
+**Depth sensor at boot and on reset.** Sampling is off at boot, with `dcfg=0`, so after a Teensy reset `DV` reports `dcfg` 0 and `OFF`, and the depth sensor node sends `DC` again. The sensor itself needs no re-arming: its reset and calibration read are part of every probe (section 6.12).
 
 **If USB disconnects or the Teensy resets**, the board re-enumerates, possibly as a different `/dev/ttyACM*`. A Teensy reset stops the pulses until `setup()` runs again, and that gap is longer than the ESC's roughly 0.3 s signal-loss timeout, so the ESCs stop and need stop pulses again before they drive. The firmware's boot `stop_us` provides those, and the host's `AR` after reconnecting guarantees the hold.
 
@@ -368,19 +448,37 @@ servo supply + (e.g. 6 V) ──────────────── servo
 - **The pull-down keeps the line LOW** while the Teensy is off or booting, so the servo stays limp instead of twitching on a floating line.
 - **Do not wire the Axon's analog position output to a Teensy pin** until its voltage has been measured: the scale is not published (servo doc) and Teensy pins are 3.3 V only.
 
+**Depth sensor.**
+
+```
+Teensy 3V (3.3 V out) ───────────────────── Bar red    (Vin, 2.5 to 5.5 V)
+Teensy pin 18 (SDA) ──┬──────────────────── Bar white  (SDA)
+                      └── 4.7 kΩ ── 3.3 V     pull-up (recommended)
+Teensy pin 19 (SCL) ──┬──────────────────── Bar green  (SCL)
+                      └── 4.7 kΩ ── 3.3 V     pull-up (recommended)
+Teensy GND ──────────────────────────────── Bar black  (GND)
+```
+
+- **Power it from the Teensy's 3.3 V pin** (or any 2.5 to 5.5 V supply sharing the Teensy's ground). The sensor chip draws at most 1.25 mA, while converting (Bar doc), far inside the 250 mA the Teensy's 3.3 V output supplies (Teensy doc).
+- **3.3 V logic only.** The sensor's SDA and SCL are 3.3 V lines, and 5 V logic damages it (Bar doc). Teensy pins are 3.3 V, so they connect directly; the pull-ups must go to 3.3 V, never 5 V.
+- **Pull-ups.** The Bar board's 2016 schematic shows no pull-ups, so the host must provide them (Bar doc, Open Question 5). `Wire` enables the Teensy's own pull-ups, but PJRC calls them very weak and recommends external 1 to 4.7 kΩ resistors (Teensy doc, "I2C pull-ups"). The MATE bench's Bar02 answered on these pins wired with only its four leads (`Nepi_Connect/BENCH_SETUP_PLAN.md`), but resistors are cheap insurance on a 30 cm cable.
+- **Keep the cable as supplied.** "A few centimeters of jumper wire is fine, but anything longer can cause unstable or complete communication failure" (Bar doc).
+- **The back of the sensor is not waterproof.** It mounts through a pressure-housing wall (Bar doc, "Sealing"); the Teensy stays inside the housing.
+
 ## 11. Versioning
 
-- **Protocol version `MAJOR.MINOR`, currently 1.1.** `MINOR` increments for additive changes only: a new command, or new fields appended to the end of a reply. A host must ignore reply fields beyond the ones it knows. `MAJOR` increments for any change to an existing command's fields, order, meaning or ranges.
+- **Protocol version `MAJOR.MINOR`, currently 1.2.** `MINOR` increments for additive changes only: a new command, or new fields appended to the end of a reply. A host must ignore reply fields beyond the ones it knows. `MAJOR` increments for any change to an existing command's fields, order, meaning or ranges.
 - **The host refuses a different major version.** NEPI discovery launches no node for a board whose `ID` reports a protocol major other than the one the driver was written for, and the node repeats the check when it connects. The firmware cannot check the host's version, so the host enforces compatibility. An older host that sends a newer firmware a frame it does not understand gets `FIELDS` or `UNKNOWN` and causes no motion.
 - **Firmware version `MAJOR.MINOR.PATCH`** tracks the sketch itself and appears in the NEPI device info. A firmware change that does not change the protocol bumps only this.
 - **Servos need 1.1.** The NEPI driver launches servo nodes only for a board whose `ID` reports protocol 1.1 or later and a `servo_count` of at least the number asked for. A 1.0 board still gets its thruster node.
-- **Reserved for later minor versions:** sensor reads for the I2C sensors the Teensy doc lists (BNO085, Bar depth sensor, MS8607).
+- **The depth sensor needs 1.2.** The NEPI driver launches a depth sensor node only for a board whose `ID` reports protocol 1.2 or later, and logs that the board needs reflashing otherwise. Older boards still get their thruster and servo nodes.
+- **Reserved for later minor versions:** reads for the other I2C sensors the Teensy doc lists (BNO085, MS8607).
 
 ## 12. Coverage of the Teensy doc's "To Be Defined" list
 
 | Item | Covered in |
 |---|---|
-| 1. Command set | Section 6. Thruster pulses (6.2 to 6.6) and servos (6.7 to 6.11) are covered; sensor reads are reserved (section 11) because no sensor is wired to the Teensy yet. |
+| 1. Command set | Section 6. Thruster pulses (6.2 to 6.6), servos (6.7 to 6.11) and the Bar depth sensor (6.12 to 6.14) are covered; reads for the other I2C sensors are reserved (section 11). |
 | 2. Framing and checksum | Sections 3 and 7 |
 | 3. Identify reply | Section 6.1 |
 | 4. Telemetry rate | Section 6.6: polled, no push; host chooses the rate (NEPI uses 2 Hz) |
@@ -397,7 +495,13 @@ $ID*0D                                    # identify   ('I'^'D' = 0x0D)
 $ST*07                                    # status
 $SP*03                                    # stop all
 $SV*05                                    # servo status ('S'^'V' = 0x05)
+$DC,1024*2C                               # start depth sampling at OSR 1024
+$DV*12                                    # depth sensor state and latest raw sample
+$DP*14                                    # depth sensor calibration words
+$DC,0*1B                                  # stop depth sampling
 ```
+
+`DV` shows raw readings; turning them into mbar and deg C takes the calibration words and the formulas in the Bar doc. Do not type frames at the port while a NEPI node of the board is running: its replies are matched to its own requests, and a frame typed alongside can steal one (section 2.1).
 
 Checksums for the other commands are easiest to compute with a one-liner:
 

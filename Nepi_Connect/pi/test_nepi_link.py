@@ -36,7 +36,13 @@ NEPI = '192.168.68.23'
 BENCH_LINE = '$TNCTL,0,0,0,0,100,100,100,100,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,*FF'
 STATUS_FIELDS = ['v', 'type', 'seq', 't', 'assist', 'pilot_surge', 'pilot_sway', 'pilot_yaw', 'pilot_depth',
                  'slow', 'out_lx', 'out_ly', 'out_ry', 'out_lt', 'out_rt', 'demand_seq', 'demand_age_ms', 'demand_bad',
-                 'tn', 'tn_age_ms', 'tn_count', 'tn_bad', 'assist_reason', 'nepi_ready']
+                 'tn', 'tn_age_ms', 'tn_count', 'tn_bad', 'assist_reason', 'nepi_ready', 'servos']
+# Two claw servos, the way the team's sketch might drive them: D-pad up/down
+# and the A button
+CLAW_SERVOS = dict(NEPI_SERVO_1_NAME = 'claw_pitch', NEPI_SERVO_1_INPUT = 'ABS_HAT0Y',
+                   NEPI_SERVO_2_NAME = 'claw_grip', NEPI_SERVO_2_INPUT = 'BTN_SOUTH')
+HAT0Y_SLOT = 7
+SOUTH_SLOT = 8
 TAKEOVER_STICK = 8192 # NEPI_TAKEOVER_FRACTION 0.25 of 32767, rounded up
 TAKEOVER_TRIGGER = 64 # 0.25 of the default NEPI_TRIGGER_MAX 255, rounded up
 
@@ -611,7 +617,13 @@ class TestStatus(unittest.TestCase):
         self.assertEqual((first['seq'], second['seq']), (0, 1))
 
     def test_worst_case_size_under_1200_bytes(self):
-        link, clock, logs = makeLink(NEPI_TRIGGER_DEADZONE = 40, NEPI_TRIGGER_MAX = 1023)
+        # The most servos, with the longest names
+        servos = dict()
+        for [number, event] in zip(range(1, nepi_link.MAX_SERVOS + 1), ['ABS_RX', 'ABS_HAT0X', 'ABS_HAT0Y', 'BTN_WEST']):
+            servos['NEPI_SERVO_' + str(number) + '_NAME'] = 'servo' + str(number) + 'x' * 10
+            servos['NEPI_SERVO_' + str(number) + '_INPUT'] = event
+        link, clock, logs = makeLink(NEPI_TRIGGER_DEADZONE = 40, NEPI_TRIGGER_MAX = 1023, **servos)
+        self.assertEqual([len(servo['name']) for servo in link.settings['servos']], [16] * nepi_link.MAX_SERVOS)
         link.wall_clock = lambda: 4102444800.123 # 2100-01-01
         worst_line = '$TNCTL,' + ','.join(['-2147483648'] * 8 + ['-9999999999.999999'] * 12) + ',*FF'
         link.on_teensy_line(worst_line)
@@ -638,6 +650,144 @@ class TestStatus(unittest.TestCase):
         link.merge_inputs(pilot(lt = 1023, ly = 40000, ry = -40000))
         status = link.build_status()
         self.assertEqual((status['out_lt'], status['out_ly'], status['out_ry']), (255, 32767, -32768))
+
+
+class TestServos(unittest.TestCase):
+
+    def withServos(self, inputs, pitch = 0, grip = 0):
+        inputs[HAT0Y_SLOT] = pitch
+        inputs[SOUTH_SLOT] = grip
+        return inputs
+
+    def test_value_table(self):
+        # D-pad: pressed from 0.5 either way
+        self.assertEqual([nepi_link.servo_value(d, -1, 0, 1) for d in [-1.0, -0.5, -0.49, 0.0, 0.49, 0.5, 1.0]],
+                         [-1, -1, 0, 0, 0, 1, 1])
+        # Button: any negative demand is released
+        self.assertEqual([nepi_link.servo_value(d, 0, 0, 1) for d in [-1.0, 0.0, 0.4, 0.5, 1.0]], [0, 0, 0, 1, 1])
+        # Stick: each half scales on its own
+        self.assertEqual([nepi_link.servo_value(d, -32767, 0, 32767) for d in [-1.0, -0.5, 0.0, 0.25, 1.0]],
+                         [-32767, -16384, 0, 8192, 32767])
+        # An off-center neutral
+        self.assertEqual([nepi_link.servo_value(d, 0, 100, 1100) for d in [-1.0, -0.5, 0.0, 0.5, 1.0]],
+                         [0, 50, 100, 600, 1100])
+
+    def test_config_defaults_by_input(self):
+        link, clock, logs = makeLink(NEPI_SERVO_1_NAME = 'claw_pitch', NEPI_SERVO_1_INPUT = 'ABS_HAT0Y',
+                                     NEPI_SERVO_3_NAME = 'claw_roll', NEPI_SERVO_3_INPUT = 'ABS_RX',
+                                     NEPI_SERVO_4_NAME = 'grip', NEPI_SERVO_4_INPUT = 'BTN_SOUTH',
+                                     NEPI_SERVO_4_MAX = 2)
+        self.assertEqual([(s['name'], s['slot'], s['min'], s['neutral'], s['max'], s['deadzone'])
+                          for s in link.settings['servos']],
+                         [('claw_pitch', HAT0Y_SLOT, -1, 0, 1, 0), ('claw_roll', nepi_link.RX_SLOT, -32767, 0, 32767, 2999),
+                          ('grip', SOUTH_SLOT, 0, 0, 2, 0)])
+        # Unused numbers, and no servos at all
+        self.assertEqual(makeLink(NEPI_SERVO_1_NAME = '', NEPI_SERVO_1_INPUT = 'BTN_EAST')[0].settings['servos'], [])
+        [settings, msg] = nepi_link.validate_config(dict(NEPI_LAN_IP = NEPI, **CLAW_SERVOS))
+        self.assertIn('servos claw_pitch on ABS_HAT0Y, claw_grip on BTN_SOUTH', msg)
+
+    def test_bad_servo_config_turns_the_link_off(self):
+        good = dict(NEPI_LAN_IP = NEPI, NEPI_SERVO_1_NAME = 'claw', NEPI_SERVO_1_INPUT = 'ABS_HAT0Y')
+        self.assertIsNotNone(nepi_link.validate_config(good)[0])
+        for change in [dict(NEPI_SERVO_1_NAME = 'Claw'), dict(NEPI_SERVO_1_NAME = '1claw'),
+                       dict(NEPI_SERVO_1_NAME = 'c' * 17), dict(NEPI_SERVO_1_NAME = True),
+                       dict(NEPI_SERVO_1_INPUT = None), dict(NEPI_SERVO_1_INPUT = 'ABS_HAT1X'),
+                       # NEPI's own movement inputs, slow mode and the NEPI control button
+                       dict(NEPI_SERVO_1_INPUT = 'ABS_Y'), dict(NEPI_SERVO_1_INPUT = 'ABS_RY'),
+                       dict(NEPI_SERVO_1_INPUT = 'ABS_Z'), dict(NEPI_SERVO_1_INPUT = 'BTN_TL'),
+                       dict(NEPI_SERVO_1_INPUT = 'BTN_TR'),
+                       dict(NEPI_SERVO_1_MIN = 1), dict(NEPI_SERVO_1_NEUTRAL = 2), dict(NEPI_SERVO_1_MAX = -1),
+                       dict(NEPI_SERVO_1_MIN = 0, NEPI_SERVO_1_NEUTRAL = 0, NEPI_SERVO_1_MAX = 0),
+                       dict(NEPI_SERVO_1_DEADZONE = -1), dict(NEPI_SERVO_1_MAX = 1.5), dict(NEPI_SERVO_1_MIN = False),
+                       dict(NEPI_SERVO_2_NAME = 'claw', NEPI_SERVO_2_INPUT = 'BTN_EAST'),
+                       dict(NEPI_SERVO_2_NAME = 'other', NEPI_SERVO_2_INPUT = 'ABS_HAT0Y')]:
+            config = dict(good)
+            config.update(change)
+            [settings, msg] = nepi_link.validate_config(config)
+            self.assertIsNone(settings, change)
+            self.assertIn('link off', msg)
+
+    def test_flat_file_servo_keys(self):
+        config = nepi_link.parse_flat_yaml('NEPI_LAN_IP: 192.168.68.23\nNEPI_SERVO_1_NAME: claw_pitch   # D-pad\n'
+                                           'NEPI_SERVO_1_INPUT: ABS_HAT0Y\nNEPI_SERVO_1_DEADZONE: 0\n')
+        [settings, msg] = nepi_link.validate_config(config)
+        self.assertIsNotNone(settings, msg)
+        self.assertEqual(settings['servos'][0]['name'], 'claw_pitch')
+
+    def test_pilot_mode_ignores_nepi_servo_values(self):
+        link, clock, logs = makeLink(**CLAW_SERVOS)
+        link.handle_demand(demandBytes(0, True, servos = dict(claw_pitch = 1.0, claw_grip = 1.0)), NEPI)
+        inputs = self.withServos(pilot(), pitch = -1)
+        self.assertEqual(link.merge_inputs(inputs), tuple(inputs))
+        self.assertEqual(link.merge_inputs(pilot())[HAT0Y_SLOT], 0)
+        self.assertFalse(link.build_status()['assist'])
+
+    def test_nepi_control_applies_servo_values(self):
+        link, clock, logs = makeLink(**CLAW_SERVOS)
+        seq = engage(link, clock)
+        link.handle_demand(demandBytes(seq, True, surge = 0.1, servos = dict(claw_pitch = -1.0, claw_grip = 1.0)), NEPI)
+        merged = link.merge_inputs(pilot())
+        self.assertEqual((merged[HAT0Y_SLOT], merged[SOUTH_SLOT]), (-1, 1))
+        self.assertEqual(merged[nepi_link.LY_SLOT], nepi_link.stick_value(0.1))
+        # Names this Pi has no servo for are ignored; a servo with no value is neutral
+        link.handle_demand(demandBytes(seq + 1, True, servos = dict(claw_pitch = 1.0, wrist = 1.0)), NEPI)
+        merged = link.merge_inputs(pilot())
+        self.assertEqual((merged[HAT0Y_SLOT], merged[SOUTH_SLOT]), (1, 0))
+
+    def test_pilot_wins_that_input_only(self):
+        link, clock, logs = makeLink(**CLAW_SERVOS)
+        seq = engage(link, clock)
+        link.handle_demand(demandBytes(seq, True, surge = 0.1, servos = dict(claw_pitch = 1.0, claw_grip = 1.0)), NEPI)
+        merged = link.merge_inputs(self.withServos(pilot(), pitch = -1))
+        # The pilot's D-pad wins; the button and the movement stay NEPI's
+        self.assertEqual((merged[HAT0Y_SLOT], merged[SOUTH_SLOT]), (-1, 1))
+        self.assertEqual(merged[nepi_link.LY_SLOT], nepi_link.stick_value(0.1))
+        status = link.build_status()
+        self.assertEqual((status['assist'], status['servos']), (True, dict(claw_pitch = True, claw_grip = False)))
+        # Released, NEPI's value is back
+        merged = link.merge_inputs(pilot())
+        self.assertEqual(merged[HAT0Y_SLOT], 1)
+        self.assertEqual(link.build_status()['servos'], dict(claw_pitch = False, claw_grip = False))
+
+    def test_stick_servo_pilot_dead_zone(self):
+        link, clock, logs = makeLink(NEPI_SERVO_1_NAME = 'claw_roll', NEPI_SERVO_1_INPUT = 'ABS_RX')
+        seq = engage(link, clock)
+        link.handle_demand(demandBytes(seq, True, servos = dict(claw_roll = 0.5)), NEPI)
+        # Resting stick noise inside the Teensy's dead zone is not the pilot
+        self.assertEqual(link.merge_inputs(pilot(rx = 2999))[nepi_link.RX_SLOT], 16384)
+        self.assertEqual(link.merge_inputs(pilot(rx = -3000))[nepi_link.RX_SLOT], -3000)
+        # Unlike a movement stick, a servo stick never ends NEPI control
+        self.assertEqual(link.merge_inputs(pilot(rx = 32767))[nepi_link.RX_SLOT], 32767)
+        self.assertTrue(link.build_status()['assist'])
+
+    def test_stale_demand_goes_neutral(self):
+        link, clock, logs = makeLink(**CLAW_SERVOS)
+        seq = engage(link, clock)
+        link.handle_demand(demandBytes(seq, True, servos = dict(claw_pitch = 1.0, claw_grip = 1.0)), NEPI)
+        clock.advance(0.3)
+        merged = link.merge_inputs(pilot())
+        self.assertEqual((merged[HAT0Y_SLOT], merged[SOUTH_SLOT]), (0, 0))
+
+    def test_demand_servos_validation(self):
+        link, clock, logs = makeLink(**CLAW_SERVOS)
+        for bad in ['claw', [1.0], dict(claw_pitch = 1.5), dict(claw_pitch = True), dict(claw_pitch = '1'),
+                    dict(claw_pitch = None)]:
+            [demand, msg] = nepi_link.parse_demand(demandBytes(0, True, servos = bad), NEPI, NEPI)
+            self.assertIsNone(demand, bad)
+        for bad in [float('nan'), float('inf')]:
+            datagram = json.dumps(dict(v = 1, type = 'demand', seq = 0, t = 1.0, active = True, surge = 0.0,
+                                       sway = 0.0, yaw = 0.0, pitch = 0.0, roll = 0.0,
+                                       servos = dict(claw_pitch = bad))).encode('utf-8')
+            self.assertIsNone(nepi_link.parse_demand(datagram, NEPI, NEPI)[0])
+        # No servos field: no servo values
+        self.assertEqual(nepi_link.parse_demand(demandBytes(0, True), NEPI, NEPI)[0]['servos'], dict())
+        demand = nepi_link.parse_demand(demandBytes(0, True, servos = dict(claw_pitch = -1, grip = 0.25)), NEPI, NEPI)[0]
+        self.assertEqual(demand['servos'], dict(claw_pitch = -1.0, grip = 0.25))
+
+    def test_status_lists_servos_even_before_a_merge(self):
+        link, clock, logs = makeLink(**CLAW_SERVOS)
+        self.assertEqual(link.build_status()['servos'], dict(claw_pitch = False, claw_grip = False))
+        self.assertEqual(makeLink()[0].build_status()['servos'], dict())
 
 
 class TestLinkOff(unittest.TestCase):
