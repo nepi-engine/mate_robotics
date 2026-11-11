@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 
 from optical_flow import OpticalFlow
+from radial_undistort import DEFAULT_K1, build_maps, correct, load_preset, preset
 
 
 HEADER = struct.Struct("!QIII")  # timestamp, packet index, count, body length
@@ -22,6 +23,25 @@ MAX_PACKET_LENGTH = 1400
 MAX_JPEG_LENGTH = 8_000_000
 BODY_LENGTH = MAX_PACKET_LENGTH - HEADER.size
 DISPLACEMENT_PACKET = struct.Struct("!dff")  # elapsed seconds, x px, y px
+
+
+def foreground_feature_mask(frame_shape):
+    """Exclude the camera-mounted claw and cable from raw 640x480 frames."""
+    height, width = frame_shape[:2]
+    mask = np.full((height, width), 255, dtype=np.uint8)
+    # This camera's claw fills the bottom of the native frame; its cable
+    # crosses the lower-left. Both move with the camera and can win ORB matches.
+    for x0, y0, x1, y1 in ((0, 290, 640, 480), (0, 170, 280, 290)):
+        left, right = round(x0 * width / 640), round(x1 * width / 640)
+        top, bottom = round(y0 * height / 480), round(y1 * height / 480)
+        mask[top:bottom, left:right] = 0
+    return mask
+
+
+def camera_motion_from_image_motion(dx, dy):
+    """Map this camera's rotated sensor axes to right/down-positive motion."""
+    # A leftward camera move shifts the background upward in the raw frame.
+    return float(dy), -float(dx)
 
 
 class FrameAssembler:
@@ -115,12 +135,21 @@ def main():
     parser.add_argument("--telemetry-ip", help="computer address for displacement plot")
     parser.add_argument("--telemetry-port", type=int, default=5601)
     parser.add_argument("--backend", choices=("orb", "hailo"), default="orb")
+    parser.add_argument("--mask-foreground", action="store_true",
+                        help="exclude the camera-mounted claw and cable from feature matching")
+    parser.add_argument("--undistort-config", help="override the default lens correction with a JSON preset saved by undistort_tuner.py")
     parser.add_argument("--hef", help="Hailo-8 raw SuperPoint HEF, required for --backend hailo")
     parser.add_argument("--hailo-input-scale", type=float, default=1.0 / 255.0,
                         help="scale applied to input grayscale pixels before HailoRT quantization")
     args = parser.parse_args()
     if args.backend == "hailo" and not args.hef:
         parser.error("--backend hailo requires --hef")
+    try:
+        undistort_preset = (load_preset(args.undistort_config) if args.undistort_config
+                            else preset(640, 480, DEFAULT_K1))
+    except (OSError, ValueError) as exc:
+        parser.error(f"invalid undistortion preset: {exc}")
+    undistort_maps = None
 
     feature_extractor = None
     if args.backend == "hailo":
@@ -153,11 +182,29 @@ def main():
             frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
             if frame is None:
                 continue
+            raw_shape = frame.shape
+            width, height = frame.shape[1], frame.shape[0]
+            if (width, height) != (undistort_preset["width"], undistort_preset["height"]):
+                raise ValueError("Undistortion preset size does not match camera frames: "
+                                 f"{undistort_preset['width']}x{undistort_preset['height']} "
+                                 f"versus {width}x{height}")
+            if undistort_maps is None:
+                undistort_maps = build_maps(width, height, undistort_preset["k1"])
+                print(f"Applying radial undistortion k1={undistort_preset['k1']:+.4f}", flush=True)
+            frame = correct(frame, undistort_preset["k1"], undistort_maps)
             if tracker is None:
-                tracker = OpticalFlow(frame, smooth=0.1, track_incrementally=True,
-                                      feature_extractor=feature_extractor)
+                feature_mask = foreground_feature_mask(raw_shape) if args.mask_foreground else None
+                if feature_mask is not None and undistort_maps is not None:
+                    feature_mask = cv2.remap(feature_mask, *undistort_maps,
+                                             interpolation=cv2.INTER_NEAREST,
+                                             borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                tracker = OpticalFlow(frame, smooth=1.0, track_incrementally=True,
+                                      feature_extractor=feature_extractor,
+                                      feature_mask=feature_mask)
                 tracking_start = time.monotonic()
-                print(f"Reference frame received: {frame.shape[1]}x{frame.shape[0]}", flush=True)
+                print(f"Reference frame received: {frame.shape[1]}x{frame.shape[0]}; "
+                      f"{len(tracker.ref_keypoints)} features; "
+                      f"foreground mask={'on' if args.mask_foreground else 'off'}", flush=True)
                 if telemetry is not None:
                     try:
                         telemetry.sendto(DISPLACEMENT_PACKET.pack(0.0, 0.0, 0.0), telemetry_target)
@@ -171,7 +218,7 @@ def main():
             processing_seconds += time.monotonic() - process_start
             processed += 1
             now = time.monotonic()
-            plot_x, plot_y = -float(dx), float(dy)
+            plot_x, plot_y = camera_motion_from_image_motion(dx, dy)
             if telemetry is not None:
                 try:
                     telemetry.sendto(

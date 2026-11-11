@@ -1,0 +1,15 @@
+APP_DICT:
+  display_name: Optical Flow
+  description: Live camera optical flow and displacement plots
+  pkg_name: nepi_app_optical_flow
+  group_name: PROCESS
+  config_file: app_optical_flow.yaml
+  app_file: optical_flow_app_node.py
+  node_name: app_optical_flow
+  license_type: BSD-3-Clause
+  license_link: https://opensource.org/licenses/BSD-3-Clause
+RUI_DICT:
+  rui_files:
+    - NepiAppOpticalFlow.js
+  rui_main_file: NepiAppOpticalFlow.js
+  rui_main_class: OpticalFlowApp

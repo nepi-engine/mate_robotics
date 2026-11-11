@@ -24,6 +24,7 @@ class OpticalFlow:
         max_jump_px=75.0,
         track_incrementally=False,
         feature_extractor=None,
+        feature_mask=None,
     ):
         """Create a tracker.
 
@@ -46,6 +47,7 @@ class OpticalFlow:
         self.max_jump_px = max_jump_px
         self.track_incrementally = track_incrementally
         self.feature_extractor = feature_extractor
+        self.feature_mask = None if feature_mask is None else np.where(feature_mask, 255, 0).astype(np.uint8)
         self.orb = None if feature_extractor is not None else cv2.ORB.create(
             nfeatures=nfeatures, fastThreshold=12
         )
@@ -70,6 +72,8 @@ class OpticalFlow:
     def set_reference(self, frame):
         """Use *frame* as the fixed reference without resetting smoothing."""
         reference = self.preprocess(frame)
+        if self.feature_mask is not None and self.feature_mask.shape != reference.shape:
+            raise ValueError("Feature mask must match the image dimensions.")
         self._set_reference_processed(reference)
 
     def _set_reference_processed(self, reference, features=None):
@@ -81,8 +85,15 @@ class OpticalFlow:
 
     def _extract(self, image):
         if self.feature_extractor is not None:
-            return self.feature_extractor.extract(image)
-        return self.orb.detectAndCompute(image, None)
+            keypoints, descriptors = self.feature_extractor.extract(image)
+            if self.feature_mask is None or descriptors is None:
+                return keypoints, descriptors
+            keep = [i for i, point in enumerate(keypoints)
+                    if 0 <= int(point.pt[0]) < image.shape[1]
+                    and 0 <= int(point.pt[1]) < image.shape[0]
+                    and self.feature_mask[int(point.pt[1]), int(point.pt[0])] != 0]
+            return [keypoints[i] for i in keep], descriptors[keep] if keep else None
+        return self.orb.detectAndCompute(image, self.feature_mask)
 
     def compute_displacement_px(self, current_frame):
         """Estimate and smooth the current displacement from the reference.
@@ -136,7 +147,10 @@ class OpticalFlow:
         ):
             return self.dx, self.dy
 
-        raw = np.array([transform[0, 2], transform[1, 2]], dtype=float)
+        # The affine translation describes motion at image coordinate (0, 0).
+        # For the center-of-camera trail, measure where the frame center moved.
+        center = np.array([(current.shape[1] - 1) / 2, (current.shape[0] - 1) / 2])
+        raw = transform[:, :2] @ center + transform[:, 2] - center
         if (
             self.max_jump_px is not None
             and self._last_raw is not None

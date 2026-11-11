@@ -119,7 +119,7 @@ class NetStreamCamDiscovery:
 
     ########################
     # Start node processes
-    nepi_sdk.start_timer_process((1), self.detectAndManageDevices, oneshot = True)
+    nepi_sdk.start_timer_process((1), self.runDetectionCb, oneshot = True)
     nepi_sdk.start_timer_process((1), self.updateDriverDictCb, oneshot = True)
     nepi_sdk.on_shutdown(self.cleanup_actions)
 
@@ -138,6 +138,16 @@ class NetStreamCamDiscovery:
   def updateDriverDictCb(self,timer):
     updated = self.updateDiscoveryOptions()
     nepi_sdk.start_timer_process((1), self.updateDriverDictCb, oneshot = True)
+
+  def runDetectionCb(self, timer):
+    try:
+      self.detectAndManageDevices(timer)
+    except Exception as e:
+      self.msg_if.pub_warn("Network stream discovery failed: " + type(e).__name__ + ": " + str(e),
+                           throttle_s = 5.0)
+    finally:
+      if self.check_for_devices:
+        nepi_sdk.start_timer_process(self.CHECK_INTERVAL_S, self.runDetectionCb, oneshot = True)
 
   def updateDiscoveryOptions(self):
     ########################
@@ -195,13 +205,13 @@ class NetStreamCamDiscovery:
       [supported, msg] = self.driver_class.is_supported_url(url)
       if supported == False:
         self.msg_if.pub_warn("Skipping stream URL: " + msg,
-                             throttle_s = self.LOG_THROTTLE_SEC, throttle_n = False)
+                             throttle_s = self.LOG_THROTTLE_SEC)
         continue
       device_name = self.getDeviceName(url)
       if device_name in device_names:
         self.msg_if.pub_warn("Skipping stream URL " + self.driver_class.get_safe_url(url) +
                              ": same host, port and path as an earlier entry",
-                             throttle_s = self.LOG_THROTTLE_SEC, throttle_n = False)
+                             throttle_s = self.LOG_THROTTLE_SEC)
         continue
       # A stream pushed to NEPI (fastmjpg://) holds a local UDP port, which a
       # second such stream could not open
@@ -209,7 +219,7 @@ class NetStreamCamDiscovery:
       if local_port is not None and local_port in local_ports:
         self.msg_if.pub_warn("Skipping stream URL " + self.driver_class.get_safe_url(url) +
                              ": UDP port " + str(local_port) + " is already used by an earlier entry",
-                             throttle_s = self.LOG_THROTTLE_SEC, throttle_n = False)
+                             throttle_s = self.LOG_THROTTLE_SEC)
         continue
       stream_urls.append(url)
       device_names.append(device_name)
@@ -282,11 +292,6 @@ class NetStreamCamDiscovery:
       if self.checkProbe(url) == True:
         self.startDeviceNode(url)
 
-    #########################
-    # Setup next check process
-    nepi_sdk.start_timer_process(self.CHECK_INTERVAL_S, self.detectAndManageDevices, oneshot = True)
-
-
   def checkProbe(self, url):
     # Returns True once a probe of url has succeeded. Starts a probe thread when
     # none is running and the URL is due for one, and collects finished results.
@@ -299,7 +304,7 @@ class NetStreamCamDiscovery:
           # Keep the entry until the thread returns, so stalled probes never pile up
           self.msg_if.pub_warn("Probe of stream " + safe_url + " is taking longer than " +
                                str(int(self.PROBE_TIMEOUT_SEC)) + " s",
-                               throttle_s = self.LOG_THROTTLE_SEC, throttle_n = False)
+                               throttle_s = self.LOG_THROTTLE_SEC)
         return False
       del self.probe_dict[url]
       [success, msg] = probe['result']
@@ -308,7 +313,7 @@ class NetStreamCamDiscovery:
         return True
       self.msg_if.pub_info("Stream " + safe_url + " not reachable yet (" + msg + "). Retrying every " +
                            str(int(self.PROBE_INTERVAL_SEC)) + " s",
-                           throttle_s = self.LOG_THROTTLE_SEC, throttle_n = False)
+                           throttle_s = self.LOG_THROTTLE_SEC)
       return False
 
     last_probe_time = self.last_probe_time_dict.get(url, None)
