@@ -1,10 +1,24 @@
-# NEPI Connect: Position and Heading Assist for the Coral Crusaders ROV
+# NEPI Connect
 
-## Summary
+## Overview: Connecting Any Robot
+
+NEPI Connect links a robot that has its own control code to a NEPI computer on the same network, so NEPI can read the robot's telemetry and drive it when the pilot hands it over. Connecting a robot takes one file on the robot and no new NEPI code. It has three pieces:
+
+1. **The vehicle file**, on the robot. One YAML file describes the robot: NEPI's address, which of the robot's inputs NEPI may drive and how (axes, caps, signs, dead zones, the toggle input, servos), the telemetry line the robot prints, and its cameras. [VEHICLE_FILE.md](VEHICLE_FILE.md) explains every key; [vehicles/template.yaml](vehicles/template.yaml) is a commented starting point, and [vehicles/mate_coral_crusaders.yaml](vehicles/mate_coral_crusaders.yaml) a working example.
+2. **The robot side**, in [pi/](pi). The `nepi_connect` package reads the vehicle file, announces the robot to NEPI, merges NEPI's demand into a copy of the pilot's inputs, and enforces every safety rule: only the pilot hands the robot over, the pilot takes it back at once, and a stale demand means neutral. The robot's own control loop calls four hook functions (the hooks adapter); [pi/nepi_link.py](pi/nepi_link.py) is the MATE ROV's hook file. Python 3.8 or newer and PyYAML (`sudo apt install python3-yaml`). The optional NEPI Connect service ([resources/](resources), [scripts/](scripts)) streams the robot's USB cameras over HTTP.
+3. **The NEPI side**, the `rbx_nepi_connect` RBX driver in [../Drivers/rbx_drivers](../Drivers/rbx_drivers). Its discovery waits for the robot's vehicle message and builds the driver from it: the axes it offers, its navpose, one servo page per servo, and the robot's camera addresses on its `link_status` topic. Its only options are the robot's address (`host`) and the port it listens on (`status_port`).
+
+[LINK_PROTOCOL.md](LINK_PROTOCOL.md) is the wire contract between the two sides, version 2. To connect a new robot: write its vehicle file from the template, call the four hooks from its control loop (or, if it has no loop of its own to call them from, add an adapter in `pi/nepi_connect/adapters/`), and set the driver's `host` and `status_port` on NEPI.
+
+Tests: `cd pi && python3 -B -m unittest -v test_nepi_link` (the robot side, against the real MATE vehicle file and a made-up boat), and `cd tools && python3 -B -m unittest -v test_rbx_nepi_connect` (the NEPI driver against the real robot side). [tools/fake_nepi.py](tools/fake_nepi.py) stands in for NEPI on the bench.
+
+The rest of this file is the plan for the first robot, the Coral Crusaders' MATE ROV. It was written in October 2026 for protocol version 1 and the `rbx_mate_rov_link` driver; names in it are updated to version 2 and `rbx_nepi_connect`, and [BENCH_SETUP_PLAN.md](BENCH_SETUP_PLAN.md) records the bench work behind it.
+
+## The Coral Crusaders MATE ROV: Position and Heading Assist
 
 - A NEPI computer (a Raspberry Pi 5 running NEPI) joins the Coral Crusaders' topside network switch. It receives a copy of the ROV's camera video and its sensor data. It runs a camera-based hold that keeps the robot in one place and pointed the same way.
 - The pilot turns the hold, called **assist**, on and off with one controller button. The pilot can always take over with the sticks.
-- The robot stays sealed. The Teensy firmware does not change. The team's Pi script gains about five lines and one new file that we supply (`nepi_link.py`). The video command gains one extra output.
+- The robot stays sealed. The Teensy firmware does not change. The team's Pi script gains about five lines, plus files that we supply: `nepi_link.py`, the `nepi_connect` folder and the team's vehicle file. The video command gains one extra output.
 - Today's firmware holds depth and heading, but not pitch or roll, and has no input for them. So NEPI can hold position and help hold heading. Depth stays with the Teensy's pressure sensor. Pitch and roll need an optional firmware change by the team (see Section 3).
 - The exact wire contract is in [LINK_PROTOCOL.md](LINK_PROTOCOL.md). This file explains the plan and does not repeat it.
 - The NEPI driver's current state, the problems to fix before stabilization, and its acceptance tests are in [DRIVER_HANDOFF.md](DRIVER_HANDOFF.md).
@@ -91,15 +105,15 @@ The team's code was read at commit `1af4984` of github.com/CoralCrusaders/rov-26
 
 ```
                           TEAM SWITCH (topside)
-   TOPSIDE LAPTOP -------------+------------- NEPI RPi 5 (NEPI_LAN_IP)
-   main.py, quick_render.sh    |               idx_net_stream <-- video copy, UDP 5600+N
-   (both unchanged)            |               rbx_rov_link   <-- status, UDP 5700, 10 Hz
-                               |                              --> demand, UDP 5701, 10 Hz
+   TOPSIDE LAPTOP -------------+------------- NEPI RPi 5 (network.nepi_ip)
+   main.py, quick_render.sh    |               idx_net_stream   <-- video copy, UDP 5600+N
+   (both unchanged)            |               rbx_nepi_connect <-- vehicle + status, UDP 5700
+                               |                                --> demand, UDP 5701, 10 Hz
                             TETHER             hold process (ProcessIF): video + navpose in,
-                               |               surge/sway/yaw demands out to rbx_rov_link
+                               |               surge/sway/yaw demands out to rbx_nepi_connect
                       ROV PI 192.168.68.22
-                      main.py + nepi_link.py: merge NEPI's demand into a COPY of the
-                      pilot's inputs just before nmea_encode ---> Teensy (unchanged)
+                      main.py + nepi_link.py + nepi_connect: merge NEPI's demand into a
+                      COPY of the pilot's inputs just before nmea_encode ---> Teensy (unchanged)
                       FastMJPG: send to laptop (unchanged) + send to NEPI (new)
 ```
 
@@ -111,7 +125,7 @@ The team's code was read at commit `1af4984` of github.com/CoralCrusaders/rov-26
 
 **The alternative: merging on the topside laptop.** NEPI's demands could instead be added in `topside/modes/main.py`. That would be the better choice if the team prefers not to change the Pi, or if the tether cannot carry a second copy of the video (then NEPI would get its video from a relay on the laptop, described below). It has two costs. The topside loop waits inside `get_gamepad()` until the controller changes (`topside/modes/main.py:38`), so it would have to be restructured to send a steady stream. And the 250 ms timeout must live after the merge point. If the tether dropped, the Pi would keep resending NEPI's last demand forever, because nothing downstream of the laptop times out today (Section 8, note 2).
 
-**Rates.** The hold can run at most 10 times a second on every axis, because the Pi writes the Teensy every 0.1 s (`rpi/modes/main.py:88`). Telemetry is slower, about 4 Hz (Section 1). So `nepi_link` sends NEPI a status message every 100 ms on its own timer, whether or not a new Teensy line has arrived. That way NEPI sees the assist button within about 100 ms. NEPI uses depth, heading, pitch and roll from telemetry for its navpose and to check the camera's rotation estimate. The camera, not the IMU, is the main heading source, because the IMU heading drifts and arrives slowly.
+**Rates.** The hold can run at most 10 times a second on every axis, because the Pi writes the Teensy every 0.1 s (`rpi/modes/main.py:88`). Telemetry is slower, about 4 Hz (Section 1). So `nepi_connect` sends NEPI a status message every 100 ms on its own timer, whether or not a new Teensy line has arrived. That way NEPI sees the assist button within about 100 ms. NEPI uses depth, heading, pitch and roll from telemetry for its navpose and to check the camera's rotation estimate. The camera, not the IMU, is the main heading source, because the IMU heading drifts and arrives slowly.
 
 **Video.** We add a second `send` output to each FastMJPG command, aimed at NEPI. FastMJPG allows one input and any number of outputs (`FastMJPG/src/FastMJPG.c:636-650`), so the pilot's path is unchanged. NEPI's copy uses one send round, because NEPI only wants the newest frame and can skip a lost one.
 
@@ -137,7 +151,7 @@ The team's code was read at commit `1af4984` of github.com/CoralCrusaders/rov-26
 WorkingDirectory=<rov-26 folder>
 ExecStart=<rov-26 folder>/FastMJPG/bin/FastMJPG capture /dev/video0 640 480 1 30 \
   send 192.168.68.22 5600 192.168.68.12 5600 1400 1000000 2 \
-  send 192.168.68.22 5610 <NEPI_LAN_IP> 5600 1400 1000000 1
+  send 192.168.68.22 5610 <NEPI address> 5600 1400 1000000 1
 Restart=always
 RestartSec=2
 ```
@@ -152,14 +166,14 @@ Thank you for sharing your code. It was easy to follow, and your slow-mode toggl
 
 | # | Change | Why | Size |
 |---|---|---|---|
-| 1 | Add `nepi_link.py` next to `rpi/modes/main.py` | It holds all the NEPI logic, so your script barely changes | One new file. We write and test it. |
+| 1 | Add `nepi_link.py` and the `nepi_connect` folder next to `rpi/modes/main.py`, and install PyYAML | They hold all the NEPI logic, so your script barely changes | One file and one folder. We write and test them. |
 | 2 | Add a few lines to `rpi/modes/main.py` (diff below) | Lets NEPI's demand reach the Teensy through your existing packet | About 5 lines |
-| 3 | Add the `NEPI_*` keys to `config.yaml` | Holds NEPI's address, the assist button, and the safety limits | About 12 lines |
+| 3 | Add your vehicle file, `nepi_connect_vehicle.yaml`, next to `nepi_link.py` | Holds NEPI's address, the assist button, your controller's inputs and the safety limits | One file; we supply yours, [vehicles/mate_coral_crusaders.yaml](vehicles/mate_coral_crusaders.yaml) |
 | 4 | Add one `send` output to each FastMJPG command | Gives NEPI its own copy of the video | One line per camera |
 | 5 | Optional: systemd units | Starts video and control at boot and restarts them | Two small files |
 | 6 | Pick a free address for NEPI and confirm the assist button | Network and controller setup | Answers only |
 
-**What does not change.** The Teensy firmware, the topside script, the pilot's video, and every existing control. If `NEPI_LAN_IP` is empty, or NEPI is switched off, the robot behaves exactly as it does today. Every `nepi_link` function catches its own errors and falls back to passing your inputs through untouched, so a NEPI problem cannot stop your script.
+**What does not change.** The Teensy firmware, the topside script, the pilot's video, and every existing control. If the vehicle file's `network.nepi_ip` is empty, or NEPI is switched off, the robot behaves exactly as it does today. Every `nepi_link` function catches its own errors and falls back to passing your inputs through untouched, so a NEPI problem cannot stop your script.
 
 **The hook.** This diff is for illustration; we will hand you a tested version:
 
@@ -189,16 +203,18 @@ Thank you for sharing your code. It was easy to follow, and your slow-mode toggl
                  print(onboard_data)
 ```
 
-- `start()` reads `config.yaml`. If `NEPI_LAN_IP` is empty, it does nothing.
+- `start()` reads the vehicle file ([VEHICLE_FILE.md](VEHICLE_FILE.md) "Where the Robot Looks"). If `network.nepi_ip` is empty, PyYAML is missing, or any value is invalid, it prints why and does nothing else.
 - `merge_inputs()` returns a new tuple and never changes `gamepad_inputs`.
 - `on_teensy_line()` only reads the line.
-- `topside_tag()` returns `,NEPI:ON`, `,NEPI:OFF` or `,NEPI:WAIT`, or nothing when the link is off. That puts the assist state on the pilot's screen.
+- `topside_tag()` returns `,NEPI:ON`, `,NEPI:WAIT`, `,NEPI:OFF` or `,NEPI:NOTREADY`, or nothing when the link is off. That puts the assist state on the pilot's screen.
 
 The four lines that matter are the import, `start()`, the merge, and the Teensy line. The topside tag is optional.
 
 **The assist button.** We suggest RB (`BTN_TR`), because neither sketch uses it (`new_ctl.ino` and `tuning.ino` read only LX, LY, RY, LT, RT and LB). A press toggles assist, using the same "button available" pattern as your slow mode (`new_ctl.ino:364-372`). The toggle lives on your Pi, so the button works with or without NEPI. RB still reaches the Teensy unchanged.
 
-**How the pilot stays in charge.** NEPI can only supply three things: left stick up/down for surge, left stick left/right for sway, and one trigger at a time for yaw. It never supplies the right stick or any button. On each of those three axes, the moment the pilot's own input leaves the dead zone, the pilot's value is used. A NEPI demand older than 250 ms counts as zero. Each demand is capped by a limit in your `config.yaml`. Because your firmware zeroes anything inside the dead zone, the bridge skips over it. A stick demand of 0.01 to 1 maps evenly onto 3000 to 32767, a yaw demand of 0.01 to 1 maps evenly onto 10 to 255 on one trigger, and anything below 0.01 becomes 0 (full formulas in LINK_PROTOCOL). Slow mode halves NEPI's surge and sway too, because they go through the same stick math (`new_ctl.ino:465-477`). Which stick direction is forward, right or clockwise is not known yet. We will measure it with you on the bench and set it in `config.yaml`.
+**How the pilot stays in charge.** NEPI can only supply three things: left stick up/down for surge, left stick left/right for sway, and one trigger at a time for yaw. It never supplies the right stick or any button. On each of those three axes, the moment the pilot's own input leaves the dead zone, the pilot's value is used. A NEPI demand older than 250 ms counts as zero. Each demand is capped by a limit in your vehicle file. Because your firmware zeroes anything inside the dead zone, the bridge skips over it. A stick demand of 0.01 to 1 maps evenly onto 3000 to 32767, a yaw demand of 0.01 to 1 maps evenly onto 10 to 255 on one trigger, and anything below 0.01 becomes 0 (full formulas in LINK_PROTOCOL). Slow mode halves NEPI's surge and sway too, because they go through the same stick math (`new_ctl.ino:465-477`). Which stick direction is forward, right or clockwise is not known yet. We will measure it with you on the bench and set it in your vehicle file.
+
+*Since 2026-10-22 (BENCH_SETUP_PLAN D3) this per-axis override is replaced: in NEPI control NEPI owns every movement input, including RY for heave, and the pilot takes the ROV back with RB or by pushing any movement input past a quarter of its travel. With your triggers reading 0 to 1023 and a dead zone of 40, a yaw demand maps onto 40 to 1023. [LINK_PROTOCOL.md](LINK_PROTOCOL.md) "Robot Rules" is current.*
 
 **Heading and the 7 deg/s step.** While NEPI's yaw is zero, your Teensy holds the heading it captured. When NEPI wants to turn, it pulls a trigger. When it lets go, your Teensy captures the new heading at that moment (`new_ctl.ino:484-491`). The smallest trigger value past the dead zone is 10 out of 255, which asks for about 7 deg/s (`:30, 482`). At 10 updates per second, the smallest correction is a short pulse of roughly 0.7 degrees or more. So NEPI will correct heading in small pulses and ignore errors under about 1 degree, and your hold does the holding in between. A second effect: the Blue Robotics Basic ESC has its own dead zone, called a dead band, and ignores pulses within 25 µs of stop (`Docs/Motors/bluerobotics_basic_esc.md:11`). The smallest stick value (3000) gives 3000/32767 x 0.5 x 400, about 18 µs on a horizontal thruster. So NEPI's smallest surge demands may not spin a propeller at all. Phase 3 measures the smallest demand that does. Two questions for you: would you accept a smaller trigger dead zone, for example 2 (about 1.4 deg/s)? Or would you prefer a heading-target input, where one unused stick axis (RX) nudges `yaw_target` directly? Both are firmware changes, and both are optional.
 
@@ -218,7 +234,7 @@ vfl_pwr += pitch_pwr + roll_pwr;   vfr_pwr += pitch_pwr - roll_pwr;
 vbl_pwr += -pitch_pwr + roll_pwr;  vbr_pwr += -pitch_pwr - roll_pwr;
 ```
 
-Another option, not our default: NEPI could command pitch and roll *targets* through an unused input you agree on, on top of the same firmware change. LINK_PROTOCOL reserves `pitch` and `roll` fields for this. The Pi ignores them until the firmware supports them.
+Another option, not our default: NEPI could command pitch and roll *targets* through an unused input you agree on, on top of the same firmware change. Version 1 of LINK_PROTOCOL reserved `pitch` and `roll` fields for this; version 2 carries only surge, sway, heave and yaw, so pitch and roll would be a protocol change.
 
 ## 4. What We Build on the NEPI Side
 
@@ -231,20 +247,20 @@ Nothing here is built yet. Recommended build order:
    - The probe binds the port, waits for one complete frame, and releases the port before the node starts.
    - The header's capture time gives the latency, provided both clocks are synchronized.
    - The accepted-forms comment in `idx_net_stream_params.yaml:18-29` gets the new form.
-2. **`nepi_link.py` and a fake Teensy for the bench** (Section 7). Both are Python and follow NEPI's naming rules.
-3. **An RBX driver, `rbx_mate_rov_link`** (in `Drivers/rbx_drivers`), with the file names `setup_new_driver.sh` gives for `DRIVER_NAME="mate_rov_link"`. It follows `rbx_gazebo` in the nepi_drivers repo, which is newer than `rbx_template_*`. Written 2026-10-22; not yet run under ROS or on the robot.
-   - Discovery listens on UDP 5700 for up to 1.5 s for one valid status from the ROV's address, then closes the port and launches the node. It never listens while the node runs, because the node holds that port. Its options are `host` (192.168.68.22), `status_port` (5700) and `demand_port` (5701).
-   - **Two classes in the node file.** `MateRovLink` holds all the link logic: both sockets, status checking, link-up tracking, the newest teleop command, the on/off rule, the latch and `seq`. It follows `FastMJPGReceiver` and `NepiLink`, and never calls ROS, so `Nepi_Connect/tools/test_rbx_mate_rov_link.py` tests it against the real `nepi_link.py`. `MateRovLinkNode` follows `rbx_gazebo`: it starts the link, runs its send tick on a 10 Hz timer, and registers `RBXRobotIF`.
+2. **`nepi_link.py` and a fake Teensy for the bench** (Section 7). Both are Python and follow NEPI's naming rules. Since 2026-11-11 `nepi_link.py` is a thin hook file over the generic `nepi_connect` package (Overview, above).
+3. **An RBX driver, now `rbx_nepi_connect`** (in `Drivers/rbx_drivers`; written 2026-10-22 as `rbx_mate_rov_link`, made generic and renamed 2026-11-11). It follows `rbx_gazebo` in the nepi_drivers repo, which is newer than `rbx_template_*`. Not yet run under ROS or on the robot. This item records the October plan; where it differs from the code (the on/off rule and the latch below were replaced by the pilot's toggle, BENCH_SETUP_PLAN D3), [LINK_PROTOCOL.md](LINK_PROTOCOL.md) "NEPI Rules" and the driver header are current.
+   - Discovery listens on UDP 5700 for up to 1.5 s for one valid vehicle message from the robot's address, then closes the port and launches the node, built from that announcement. It never listens while the node runs, because the node holds that port. Its options are `host` (192.168.68.22) and `status_port` (5700); the demand port comes from the vehicle message.
+   - **Two classes in the node file.** `NepiConnectLink` holds all the link logic: both sockets, status checking, link-up tracking, the newest teleop command, the demand rule and `seq`. It follows `FastMJPGReceiver` and the robot side's `NepiControl`, and never calls ROS, so `Nepi_Connect/tools/test_rbx_nepi_connect.py` tests it against the real `nepi_connect` package. `NepiConnectNode` follows `rbx_gazebo`: it starts the link, runs its send tick on a 10 Hz timer, and registers `RBXRobotIF`.
    - The node registers `RBXRobotIF` with:
-     - empty state, mode and action lists;
-     - axis controls for x, y and yaw only;
-     - a navpose of depth, yaw, pitch and roll from the newest telemetry, skipped while `tn` is null or older than 500 ms;
+     - the states PILOT and NEPI, and empty mode and action lists;
+     - axis capabilities for the announced axes (for this ROV x, y, z and yaw);
+     - no navpose of its own: an `NPXDeviceIF` the node hosts publishes the announced navigation groups (depth, and orientation with its rates) from the newest telemetry, skipped while `nav` is null or older than 500 ms, and the node selects it as the RBX navpose source;
      - `goStopFunction`, and the teleop pair `teleopControlsReadyFunction` and `setTeleopVelocityFunction`. Every other callback is None.
    - **Readiness.** `teleopControlsReadyFunction` is true while the link is up: a valid status from the ROV arrived within the last 500 ms. It does not wait for assist, because `RBXRobotIF` drops commands while the robot is not ready, and assist only comes on after NEPI sends `active` true.
    - **On/off rule.** While the link is up, the driver sends a demand every 100 ms. It sends `active` true while it holds a teleop command newer than 250 ms and is not latched, with surge = linear.x, sway = -linear.y and yaw = -angular.z, each clamped to -1 to 1. linear.z is ignored. Otherwise it sends `active` false with every axis 0. While the link is down it sends nothing. The first `seq` comes from the wall clock, so a restarted node is always ahead of its previous run.
    - **Latch.** While it sends `active` true, a newest status with assist false latches the driver to `active` false, if assist was on during this engagement (RB, or the Pi's 2 s timeout) or 0.5 s has passed since the engagement's first `active` true (a link outage, or a restarted Pi script, which ignores a first `active` true). The latch clears only after no teleop command has arrived for 1 s, so the hold process must stop and restart its commands to engage again. Stop clears the stored command and sets the latch. NEPI never turns assist back on by itself.
-   - **Link state for the hold process.** Every tick, the node publishes the link's state as JSON in a `std_msgs/String` on its own `link_status` topic: `link_up`, `latched`, `assist`, `assist_reason`, the four pilot flags, `slow`, `demand_age_ms` and `tn_age_ms`. `RBXRobotIF` has no fields for these.
-   - **Servos (added 2026-10-28).** The Pi can list up to four servos the sketch moves from a controller input, such as the claw's. Discovery launches one SVX node per servo, and NEPI moves them only in NEPI control. The team's code does not change. LINK_PROTOCOL "Servos" has the details.
+   - **Link state for the hold process.** Every tick, the node publishes the link's state as JSON in a `std_msgs/String` on its own `link_status` topic: `link_up`, `nepi_control`, `control`, `control_reason`, `pilot` per axis, `demand_age_ms`, `nav_age_ms`, `servos`, `raw`, the vehicle name and each camera's address. `RBXRobotIF` has no fields for these.
+   - **Servos (added 2026-10-28).** The vehicle file can list up to four servos the sketch moves from a controller input, such as the claw's. Discovery launches one SVX node per servo, and NEPI moves them only in NEPI control. The team's code does not change. LINK_PROTOCOL "Servos" has the details.
 4. **Using `RBXRobotIF` as it is.** An earlier analysis expected a missing piece here: `goto_velocity` blocks, refuses new commands while one is active, and sleeps 0.5 s (nepi_engine repo, `nepi_api/src/nepi_api/device_if_rbx.py:1455, 1459, 1472`). But `RBXRobotIF` already has `set_teleop_velocity`. It is a stock `Twist` message with a queue of one, so the newest command wins, and it never blocks (`:644-657, 1278-1296`). So no interface change is needed, and the hold loop does not have to live inside the driver. Two small caveats:
    - The interface logs one info line per teleop message (`:1279`), which is noisy at 10 Hz. A throttled log would be a small engine change.
    - The interface has no teleop timeout. The driver owns the timeout, as `rbx_ardupilot` does with its own (nepi_drivers repo, `rbx_drivers/rbx_ardupilot_node.py:670`).
@@ -262,10 +278,10 @@ Nothing here is built yet. Recommended build order:
 1. The pilot always wins on any axis where their stick or trigger is outside the dead zone.
 2. NEPI never supplies the right stick or any button. Depth stays with the Teensy's depth hold.
 3. A demand older than 250 ms counts as zero. If the link is down, NEPI's demand is zero.
-4. The Pi caps every demand (`NEPI_MAX_SURGE`, `NEPI_MAX_SWAY`, `NEPI_MAX_YAW`). The first pool tests use low caps.
+4. The Pi caps every demand (the `cap` of each axis in the vehicle file). The first pool tests use low caps.
 5. Assist starts off. It turns itself off after 2 s with no fresh demand, and only the pilot can turn it back on. NEPI never re-engages silently.
 6. A `nepi_link` error can never stop `main.py`. On any error, the pilot's inputs pass through untouched.
-7. An empty `NEPI_LAN_IP` restores today's behavior exactly. That is the off switch.
+7. An empty `network.nepi_ip` in the vehicle file restores today's behavior exactly. That is the off switch.
 8. The link has no password. The Pi accepts demands only from NEPI's address, but anything on the switch could pretend to be NEPI. Keep the switch closed: no guest devices and no Wi-Fi bridge.
 9. The pilot's video must not depend on NEPI. FastMJPG exits on any send error (`FastMJPG/src/VideoUDPSender.c:64-67`), and both outputs share one process. Whether Linux reports an error when NEPI is switched off is untested (a hypothesis), so Phase 1 tests it. If it does, the `Restart=always` unit or the laptop relay protects the pilot's video.
 10. The first tests with a NEPI demand run with the propellers out of the water (Phase 3).
@@ -286,18 +302,18 @@ Each phase must pass before the next starts. The numbers are starting targets fo
 - The pilot's video keeps running when NEPI is switched off.
 - Tether bandwidth is recorded with `ip -s link` on the Pi, read twice 10 s apart.
 
-**Phase 2: Read-only telemetry.** `nepi_link` sends status; `rbx_rov_link` shows depth, heading, pitch and roll in NEPI. No demands are sent yet.
+**Phase 2: Read-only telemetry.** `nepi_link` sends status; `rbx_nepi_connect` shows depth, heading, pitch and roll in NEPI. No demands are sent yet.
 *Pass:*
-- The telemetry rate is measured from `tn_count` and recorded.
+- The telemetry rate is measured from `nav_count` and recorded.
 - NEPI's values match the topside printout.
 - Turning the robot by hand changes heading in NEPI.
-- Status keeps arriving at 10 Hz with the Teensy unplugged, while `tn_age_ms` grows.
+- Status keeps arriving at 10 Hz with the Teensy unplugged, while `nav_age_ms` grows.
 
 **Phase 3: Toggle and assist, propellers out of the water.** First confirm which firmware is installed (Section 8, note 1). Where thrusters are not driven, judge by the `*_pwr` telemetry values.
 *Pass:*
 - RB switches the topside display between `NEPI:ON` and `NEPI:OFF`. With NEPI off, the display shows `NEPI:WAIT`, then `OFF` after 2 s.
-- **Signs.** A test surge demand of +0.1 drives the horizontal thrusters the same way as the pilot's "forward". Sway +0.1 matches "right". Yaw +0.1 matches clockwise. Set the `NEPI_*_SIGN` keys to match.
-- **Timeout.** When NEPI stops sending, `out_ly` returns to the pilot's value within 0.35 s.
+- **Signs.** A test surge demand of +0.1 drives the horizontal thrusters the same way as the pilot's "forward". Sway +0.1 matches "right". Yaw +0.1 matches clockwise. Set each axis's `sign` in the vehicle file to match.
+- **Timeout.** When NEPI stops sending, the status's `out.ABS_Y` returns to the pilot's value within 0.35 s.
 - **Override, per axis.** The pilot's LY replaces NEPI's surge but leaves NEPI's sway and yaw in place. Likewise for LX and for the triggers.
 - Slow mode halves NEPI's surge power.
 - Garbage sent to port 5701 changes nothing and raises `demand_bad`.
@@ -387,7 +403,7 @@ The 2026-10-26 answers on the depth sensor (Bar02, fresh water), the claws and t
 ## References
 
 1. Coral Crusaders ROV code, commit `1af4984`: github.com/CoralCrusaders/rov-26. Used for: every `file:line` citation without a repo name.
-2. [LINK_PROTOCOL.md](LINK_PROTOCOL.md). Used for: ports, message fields, rates, timeouts, mappings, the video packet format.
+2. [LINK_PROTOCOL.md](LINK_PROTOCOL.md) and [VEHICLE_FILE.md](VEHICLE_FILE.md). Used for: ports, message fields, rates, timeouts, mappings, the video packet format, the vehicle file.
 3. [Adafruit BNO085 IMU](../Docs/npx/adafruit_bno085_imu.md). Used for: game rotation vector drift.
 4. [Blue Robotics Basic ESC](../Docs/Motors/bluerobotics_basic_esc.md). Used for: the ±25 µs dead band around stop.
 5. nepi_engine repo: `nepi_api/src/nepi_api/device_if_rbx.py`, `nepi_api/src/nepi_api/process_if.py`, `nepi_managers/scripts/network_mgr.py`. Used for: teleop and goto behavior, ProcessIF, the IP alias behavior.

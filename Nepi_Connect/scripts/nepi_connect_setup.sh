@@ -9,10 +9,11 @@
 ##
 
 # Sets up the NEPI Connect service on the robot's Pi. It stages the service's
-# settings in ~/nepi_connect and adds the nepi_connect_start and
-# nepi_connect_stop commands to the user's shell. It installs nothing: the
-# service streams with ustreamer, which must already be installed
-# (sudo apt install -y ustreamer).
+# settings and a vehicle file template in ~/nepi_connect and adds the
+# nepi_connect_start and nepi_connect_stop commands to the user's shell. It
+# installs nothing: the service streams with ustreamer and reads the vehicle
+# file with PyYAML, which must already be installed
+# (sudo apt install -y ustreamer python3-yaml).
 #
 # Run it as the user who will start the service, without sudo:
 #     bash <this checkout>/Nepi_Connect/scripts/nepi_connect_setup.sh
@@ -22,6 +23,7 @@
 
 SCRIPT_FOLDER=$(cd -P "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)
 RESOURCES_FOLDER=$(dirname "${SCRIPT_FOLDER}")/resources
+VEHICLE_TEMPLATE=$(dirname "${SCRIPT_FOLDER}")/vehicles/template.yaml
 
 if [[ $EUID -eq 0 ]]; then
     echo "Run this as your own user, without sudo: it sets up that user's shell."
@@ -54,6 +56,10 @@ if ! id -nG | grep -qw video; then
     echo "WARNING: ${USER} is not in the video group, so ustreamer cannot open the camera."
     echo "WARNING: Fix it with: sudo usermod -aG video ${USER}, then log out and back in."
 fi
+if ! python3 -c "import yaml" >/dev/null 2>&1; then
+    echo "WARNING: PyYAML missing, so neither the service nor the link can read the vehicle file."
+    echo "WARNING: Install it with: sudo apt install python3-yaml"
+fi
 
 
 ####################################
@@ -66,6 +72,19 @@ if [[ -f "$NEPI_CONNECT_USER_CONFIG" ]]; then
 else
     cp "${RESOURCES_FOLDER}/config/nepi_connect_config.sh" "$NEPI_CONNECT_USER_CONFIG"
     echo "Settings staged in: ${NEPI_CONNECT_USER_CONFIG}"
+fi
+
+# The vehicle file, which describes this robot to NEPI and lists the cameras
+# the service streams (Nepi_Connect/VEHICLE_FILE.md). The template's empty
+# nepi_ip keeps the link off until you fill it in. An existing file is kept.
+NEPI_CONNECT_VEHICLE_FILE=$(dirname "$NEPI_CONNECT_USER_CONFIG")/nepi_connect_vehicle.yaml
+if [[ -f "$NEPI_CONNECT_VEHICLE_FILE" ]]; then
+    echo "Keeping your existing vehicle file: ${NEPI_CONNECT_VEHICLE_FILE}"
+elif [[ -f "$VEHICLE_TEMPLATE" ]]; then
+    cp "$VEHICLE_TEMPLATE" "$NEPI_CONNECT_VEHICLE_FILE"
+    echo "Vehicle file template staged in: ${NEPI_CONNECT_VEHICLE_FILE}"
+else
+    echo "WARNING: Vehicle file template not found at: ${VEHICLE_TEMPLATE}"
 fi
 
 
@@ -100,9 +119,10 @@ echo "NEPI Connect Setup Complete"
 echo "##################################"
 echo ""
 echo "Open a new terminal (or run: source ~/.bashrc), then:"
-echo "    nepi_connect_start    start the service, which starts the camera stream"
-echo "    nepi_connect_stop     stop the service and the stream"
+echo "    nepi_connect_start    start the service, which starts the camera streams"
+echo "    nepi_connect_stop     stop the service and the streams"
 echo ""
-echo "Settings (camera, resolution, frame rate, port): ${NEPI_CONNECT_USER_CONFIG}"
+echo "Vehicle file (this robot, and its cameras): ${NEPI_CONNECT_VEHICLE_FILE}"
+echo "Service settings (timing): ${NEPI_CONNECT_USER_CONFIG}"
 echo "Service log: /tmp/nepi_connect_service.log"
 echo ""

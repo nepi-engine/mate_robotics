@@ -1,0 +1,49 @@
+# NEPI Connect RBX driver -- params / manifest.
+# See rbx_gazebo_params.yaml in nepi_drivers for the shipped reference of this
+# shape.
+
+driver:
+  pkg_name: RBX_NEPI_CONNECT
+  display_name: NEPI Connect
+  description: Driver package for any robot that runs NEPI Connect (Nepi_Connect/pi) and announces itself with a vehicle file, over the NEPI Connect link protocol version 2 (UDP/JSON)
+  type: RBX
+  group_id: MATE
+
+  NODE_DICT:
+    file_name: rbx_nepi_connect_node.py
+    class_name: NepiConnectNode
+
+  # No separate driver file: the link to the robot lives in the node file's
+  # NepiConnectLink class, which the node holds, same as rbx_gazebo has no
+  # driver file of its own.
+  DRIVER_DICT:
+    file_name: None
+    class_name: None
+
+  DISCOVERY_DICT:
+    file_name: rbx_nepi_connect_discovery.py
+    class_name: NepiConnectDiscovery
+    process: CALL
+    OPTIONS:
+      # Address of the robot running NEPI Connect. Only vehicle and status
+      # messages from this address count, both for discovery and for the
+      # launched node's link-up check, and demands are sent to it. The robot
+      # announces everything else, including its demand port.
+      host:
+        type: String
+        options:
+          - ''
+        default: '192.168.68.22'
+        value: '192.168.68.22'
+      # Port on this device that the robot sends its vehicle and status
+      # messages to; it must equal network.status_port in the robot's vehicle
+      # file. Discovery listens here for one valid vehicle message before
+      # launching the node, which then holds this port itself -- so it is
+      # never probed while the node runs.
+      status_port:
+        type: Int
+        options:
+          - '1024'
+          - '65535'
+        default: '5700'
+        value: '5700'

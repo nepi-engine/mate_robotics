@@ -106,7 +106,7 @@ MOVE_CONTROLS_DICT = {
 #   inside this module.
 #
 # WHAT NOT TO CHANGE
-#   The signature and the return shape. AutoMoveIF.runPlanning() calls this with
+#   The signature and the return shape. UiIF.runPlanning() calls this with
 #   exactly these six arguments and hands each returned step straight to
 #   ConnectRBXDeviceIF.goto_position(). Changing either without changing that
 #   caller breaks the goto process silently -- a step with an unexpected key
@@ -460,7 +460,7 @@ def plan_move(goto_dict, np_depth_map, objects_list, targets_list, robot_dict, c
 #   state and the live controls -- and return several timed velocity legs.
 #
 # WHAT NOT TO CHANGE
-#   The signature and the return shape. AutoMoveIF.runPlanning() calls this with
+#   The signature and the return shape. UiIF.runPlanning() calls this with
 #   exactly the same arguments plan_move() takes, and hands each returned step
 #   straight to ConnectRBXDeviceIF.goto_velocity(). A step with an unexpected
 #   key simply commands zero on that axis -- no error, just a robot that does

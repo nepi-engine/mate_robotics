@@ -19,25 +19,25 @@
 import copy
 
 from nepi_sdk import nepi_sdk
-from nepi_sdk import nepi_auto_move
+from nepi_sdk import nepi_ui
 
 from nepi_api.messages_if import MsgIF
-from nepi_api.auto_move_if import AutoMoveIF
+from nepi_api.ui_if import UiIF
 
 
 #########################################
 # Node Class
 #########################################
 
-class NepiAutoMoveApp(object):
+class NepiUiApp(object):
 
     #######################
     ### Node Initialization
-    DEFAULT_NODE_NAME = "app_auto_move"  # Can be overwritten by launch command
+    DEFAULT_NODE_NAME = "app_ui"  # Can be overwritten by launch command
 
     APP_DESCRIPTION = 'Click to go move process'
 
-    auto_move_if = None
+    ui_if = None
 
     def __init__(self):
         #### APP NODE INIT SETUP ####
@@ -53,15 +53,15 @@ class NepiAutoMoveApp(object):
         self.msg_if.pub_info("Starting Node Initialization Processes")
 
         ##############################
-        # Create the AutoMove IF.
+        # Create the Ui IF.
         #
         # controls_dict is the SDK module's control DEFINITION dict (the
-        # nepi_controls init-dict form). AutoMoveIF hands it to a ControlsIF and
+        # nepi_controls init-dict form). UiIF hands it to a ControlsIF and
         # hands the ControlsIF's live controls_dict back to planMove on every
         # goto. The node never reads control values itself.
-        controls_dict = copy.deepcopy(nepi_auto_move.MOVE_CONTROLS_DICT)
+        controls_dict = copy.deepcopy(nepi_ui.MOVE_CONTROLS_DICT)
 
-        self.auto_move_if = AutoMoveIF(
+        self.ui_if = UiIF(
                             namespace = self.node_namespace,
                             description = self.APP_DESCRIPTION,
                             controls_dict = controls_dict,
@@ -79,10 +79,10 @@ class NepiAutoMoveApp(object):
         #########################################################
 
     def planMove(self, goto_dict, np_depth_map, objects_list, targets_list, robot_dict, controls_dict, obstacles_list = None):
-        # Called by AutoMoveIF once per goto trigger. Thin pass-through to the
+        # Called by UiIF once per goto trigger. Thin pass-through to the
         # SDK module so the planner ships in nepi_sdk and any other node can call
         # it with the same planner arguments.
-        return nepi_auto_move.plan_move(goto_dict,
+        return nepi_ui.plan_move(goto_dict,
                                         np_depth_map,
                                         objects_list,
                                         targets_list,
@@ -94,7 +94,7 @@ class NepiAutoMoveApp(object):
         # The velocity-mode twin of planMove. Same arguments, same pass-through
         # shape; the returned steps carry m/s and deg/s plus a duration instead
         # of metres and degrees.
-        return nepi_auto_move.plan_velocity_move(goto_dict,
+        return nepi_ui.plan_velocity_move(goto_dict,
                                                  np_depth_map,
                                                  objects_list,
                                                  targets_list,
@@ -107,4 +107,4 @@ class NepiAutoMoveApp(object):
 # Main
 #########################################
 if __name__ == '__main__':
-    NepiAutoMoveApp()
+    NepiUiApp()

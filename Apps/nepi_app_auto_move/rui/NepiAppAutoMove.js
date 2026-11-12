@@ -59,7 +59,7 @@ function round(value, decimals = 0) {
 // The two selectors are the standard connect components pointed at the connect
 // namespaces the node owns:
 //   Robot -> <app>/rbx_connect    (ConnectRBXDeviceIF)
-//   Image -> <app>/image_connect  (ConnectImageIF)
+//   Image -> <app>/image_connect  (ConnectColorImageIF)
 // Both names are declared node-side as explicit connect_name arguments so the
 // binding is greppable from both sides; the names held in state below must match
 // those node-side names character for character. Each selector runs with

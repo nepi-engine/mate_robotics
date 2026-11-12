@@ -44,10 +44,10 @@ from nepi_sdk import nepi_img
 
 from nepi_api.messages_if import MsgIF
 from nepi_api.node_if import NodeSubscribersIF, NodeClassIF
-from nepi_api.system_if import ControlsIF
+from nepi_api.utils_if import ControlsIF
 
 from nepi_api.connect_device_if_rbx import ConnectRBXDeviceIF
-from nepi_api.connect_data_if import ConnectImageIF
+from nepi_api.connect_data_product_if_image import ConnectColorImageIF
 
 
 # The obstacle overlay layer is optional. nepi_app_obstacles ships its own
@@ -75,7 +75,7 @@ SYSTEM_ALL_TOPIC = 'all'
 # namespace that IF owns, and is the exact string the matching Nepi_IF_Connect*
 # component in NepiAppAutoMove.js binds to. Both are declared rather than
 # defaulted because the class defaults do not survive contact with a second
-# instance -- every ConnectImageIF would land on ConnectDataIF's 'data_connect'
+# instance -- every ConnectColorImageIF would land on its 'color_image_connect'
 # -- so each is passed explicitly to keep the RUI binding unambiguous and
 # greppable from both sides.
 RBX_CONNECT_NAME = 'rbx_connect'
@@ -693,7 +693,7 @@ class AutoMoveIF:
                         controls_description = self.description,
                         controls_init_dict = self.controls_dict,
                         msg_if = self.msg_if)
-        self.controls_if.wait_for_controls_ready()
+        self.controls_if.wait_for_ready()
 
         ###############################
         # Create Connect IFs
@@ -932,7 +932,7 @@ class AutoMoveIF:
         status_msg.goto_step_count = int(self.goto_step_count)
 
         status_msg.controls_namespace = self.get_controls_namespace()
-        status_msg.controls_ready = False if self.controls_if is None else self.controls_if.get_controls_ready_state()
+        status_msg.controls_ready = False if self.controls_if is None else self.controls_if.get_ready_state()
 
         self.status_msg = status_msg
 
@@ -973,7 +973,7 @@ class AutoMoveIF:
                         show_data = False,
                         msg_if = self.msg_if)
 
-        self.image_if = ConnectImageIF(
+        self.image_if = ConnectColorImageIF(
                         connect_name = IMAGE_CONNECT_NAME,
                         filter_topic_list = ['color_image'],
                         show_selector = True,
@@ -1259,7 +1259,7 @@ class AutoMoveIF:
     # Data Callbacks
 
     def imageStatusCb(self, status_dict):
-        # ConnectDataIF hands the ImageStatus over as a dict.
+        # ConnectDataProductIF hands the ImageStatus over as a dict.
         if not isinstance(status_dict, dict):
             return
         self.image_status_dict = status_dict

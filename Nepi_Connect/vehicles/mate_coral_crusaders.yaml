@@ -1,0 +1,178 @@
+# NEPI Connect vehicle file for the Coral Crusaders MATE ROV control Pi.
+#
+# Converted on 2026-11-11 from the NEPI team's Handoff/nepi_link_team.yaml of
+# 2026-11-02. The values are the same, so the ROV behaves exactly as it did
+# with that file. Every key is explained in Nepi_Connect/VEHICLE_FILE.md;
+# this file is its worked example.
+#
+# On the Pi, copy this file beside nepi_link.py and name it
+# nepi_connect_vehicle.yaml (Handoff/PI_INTEGRATION.md). An empty nepi_ip
+# turns the link off. PyYAML must be installed: sudo apt install python3-yaml
+#
+# Code references point to the team's repository (github.com/CoralCrusaders/
+# rov-26) at commit 1af4984, unless they name a NEPI repository.
+
+vehicle:
+  name: mate_coral_crusaders
+  kind: ROV
+
+network:
+  nepi_ip: 192.168.68.103   # your NEPI; demands from any other address are dropped
+  status_port: 5700         # must equal the driver's status_port option on NEPI
+  demand_port: 5701         # NEPI reads this from the vehicle message; no NEPI option to match
+  # The team's own ports are UDP 5600 to 5604 for video and TCP 10110 for
+  # control (config.yaml:4-10). Ports 5700, 5701 and 5610 to 5614 appear
+  # nowhere in the team's code.
+
+control:
+  adapter: hooks             # main.py calls nepi_link.py at four places (main_py_nepi_link.patch)
+  toggle_input: BTN_TR       # RB: hands the ROV to NEPI and back
+  takeover_fraction: 0.25    # any movement input past this share of its travel ends NEPI control
+  # LB is the team's slow mode: the Teensy halves stick power while it is on
+  # (new_ctl.ino:364-379). NEPI never writes it, and no axis, servo or toggle
+  # may use it.
+  reserved_inputs: [BTN_TL]
+
+  # The 18 values the Pi hands to nmea_encode, in gamepad_map order
+  # (rpi/modes/main.py:39-58). They match the Teensy's input_data_t order
+  # (mcu/modes/new_ctl/new_ctl.ino:130-149).
+  #
+  # Sticks: the Teensy zeroes anything inside +/-3000 (JOYSTICK_DEADZONE_CONST,
+  # new_ctl.ino:29) and passes the rest through without rescaling, up to
+  # 32767 (JOYSTICK_MAGNITUDE, new_ctl.ino:27; new_ctl.ino:563-582). It zeroes
+  # |RX| < 3000 too (new_ctl.ino:570).
+  #
+  # Triggers: deadzone must equal TRIGGER_DEADZONE_CONST in your sketch (rov-26
+  # tuning.ino:30), and max must equal TRIGER_MAGNITUDE; you said your triggers
+  # read 0 to 1023. new_ctl.ino uses 10 and 255 instead (new_ctl.ino:28, 30).
+  #
+  # Buttons read 0 or 1, the D-pad -1, 0 or 1. A dead zone of 1 means any
+  # value off neutral counts as held.
+  inputs:
+    ABS_X:      {slot: 0,  min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: LX}
+    ABS_Y:      {slot: 1,  min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: LY}
+    ABS_RX:     {slot: 2,  min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: RX}
+    ABS_RY:     {slot: 3,  min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: RY}
+    BTN_THUMBL: {slot: 4,  min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_THUMBR: {slot: 5,  min: 0, neutral: 0, max: 1, deadzone: 1}
+    ABS_HAT0X:  {slot: 6,  min: -1, neutral: 0, max: 1, deadzone: 1}
+    ABS_HAT0Y:  {slot: 7,  min: -1, neutral: 0, max: 1, deadzone: 1}
+    BTN_SOUTH:  {slot: 8,  min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_EAST:   {slot: 9,  min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_NORTH:  {slot: 10, min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_WEST:   {slot: 11, min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_TL:     {slot: 12, min: 0, neutral: 0, max: 1, deadzone: 1, label: LB}
+    BTN_TR:     {slot: 13, min: 0, neutral: 0, max: 1, deadzone: 1, label: RB}
+    ABS_Z:      {slot: 14, min: 0, neutral: 0, max: 1023, deadzone: 40, label: LT}
+    ABS_RZ:     {slot: 15, min: 0, neutral: 0, max: 1023, deadzone: 40, label: RT}
+    BTN_START:  {slot: 16, min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_SELECT: {slot: 17, min: 0, neutral: 0, max: 1, deadzone: 1}
+
+  # What each axis means on the Teensy:
+  # - Surge and sway are open-loop power: the stick sets thruster power and
+  #   nothing measures the result (new_ctl.ino:465-477), so a surge demand
+  #   means "this much stick".
+  # - Heave on RY: while NEPI's heave is 0, RY is 0 and the Teensy's own depth
+  #   hold keeps the depth (new_ctl.ino:426-435), as when the pilot centers
+  #   the stick.
+  # - Yaw is a rate request: a full trigger asks for 180 deg/s
+  #   (new_ctl.ino:482). While the yaw NEPI sends is 0, the Teensy holds the
+  #   heading it captured when the triggers last returned to 0
+  #   (new_ctl.ino:484-491). The smallest nonzero rate is about 7 deg/s.
+  #
+  # What the mapping gives with these values (VEHICLE_FILE.md "Mapping"). LY
+  # comes out negative because surge's sign is -1:
+  #   surge 0.01  ->  LY = -3000           9% stick
+  #   surge 0.2   ->  LY = -8713           27% stick
+  #   surge 1.0   ->  LY = -32767          full stick
+  #   yaw 0.01    ->  one trigger = 40     7.0 deg/s
+  #   yaw 0.1     ->  one trigger = 129    22.7 deg/s
+  #   yaw 1.0     ->  one trigger = 1023   180 deg/s
+  # The caps below keep surge at or under 0.2 and yaw at or under 0.1.
+  axes:
+    surge: {kind: stick, input: ABS_Y, sign: -1, cap: 0.2}   # measured with rov-26 code and a stock Xbox pad: LY pushed forward reads negative
+    sway:  {kind: stick, input: ABS_X, sign: 1, cap: 0.2}    # measure: Handoff/TEST_PLAN.md "Measuring the Signs and the IMU Mount"
+    heave: {kind: stick, input: ABS_RY, sign: 1, cap: 0.2}   # heave is positive down; measure as for sway
+    yaw:   {kind: trigger_pair, inputs: [ABS_Z, ABS_RZ], sign: 1, cap: 0.1}   # set cap 0 until you have checked finding 1 in Handoff/SAFETY.md
+
+  # No NEPI servos: you said NEPI does not need to move the claw
+  # (Handoff/NEPI_SETUP.md "Optional Servos").
+  #
+  # The claw servos are Axon MAX MK2s (Docs/svx/axon_max_mk2_servo.md). Which
+  # inputs move them, and how, is still open (BENCH_SETUP_PLAN V14). An Axon
+  # flashed with its continuous-rotation firmware reads its pulse as speed.
+  # NEPI 3.4 has no continuous servo mode, so NEPI could set such a servo's
+  # speed only with gotos, holding the input in one direction until another
+  # goto. In servo mode it can travel about 350 deg, so set the NEPI servo's
+  # min_deg and max_deg to the angles the sketch's two input ends reach.
+  # Example, the claw's pitch on the D-pad's up/down:
+  #   servos:
+  #     claw_pitch: {input: ABS_HAT0Y}
+  servos: {}
+
+telemetry:
+  # The Teensy prints one line every 50 passes through loop() (new_ctl.ino:14,
+  # 641-644): $TNCTL, then 20 comma-separated values, then *FF
+  # (new_ctl.ino:584-629). The *FF is a fixed placeholder, not a checksum.
+  # Decimals arrive with 2 digits after the point, the Arduino default for a
+  # double. The tuning sketch prints 25 values (tuning.ino:601-656), so its
+  # lines count as nav_bad.
+  format: csv_line
+  prefix: '$TNCTL'
+  trailer: '^\*[0-9A-Fa-f]{2}$'
+  fields:
+    # thruster_power, vertical then horizontal thrusters: microseconds away
+    # from 1500, -400 to 400 (new_ctl.ino:26, 33)
+    - {name: vfl_pwr, type: int}
+    - {name: vfr_pwr, type: int}
+    - {name: vbl_pwr, type: int}
+    - {name: vbr_pwr, type: int}
+    - {name: hfl_pwr, type: int}
+    - {name: hfr_pwr, type: int}
+    - {name: hbl_pwr, type: int}
+    - {name: hbr_pwr, type: int}
+    # sensor_data.depth_m, m; 0 at 101300 Pa in fresh water
+    # (MS5837/MS5837.cpp:178, new_ctl.ino:233)
+    - {name: depth_m, type: float}
+    - {name: depth_m_s, type: float}      # sensor_data.depth_m_s, m/s
+    - {name: yaw_deg, type: float}        # sensor_data.yaw_deg, -180 to 180; slowly drifts
+    - {name: pitch_deg, type: float}      # sensor_data.pitch_deg, -90 to 90
+    - {name: roll_deg, type: float}       # sensor_data.roll_deg, -180 to 180
+    - {name: yaw_deg_s, type: float}      # gyroscope x axis (new_ctl.ino:387), deg/s
+    - {name: pitch_deg_s, type: float}    # gyroscope y axis (new_ctl.ino:388), deg/s
+    - {name: roll_deg_s, type: float}     # gyroscope z axis (new_ctl.ino:389), deg/s
+    - {name: depth_rate_target_m_s, type: float}   # depth_pwr_controller.target, requested depth rate, m/s
+    - {name: depth_pwr_out, type: float}           # depth_pwr_controller.last, no unit; 1.0 = 400 us before limits
+    - {name: yaw_rate_target_deg_s, type: float}   # yaw_pwr_controller.target, requested yaw rate, deg/s
+    - {name: yaw_pwr_out, type: float}             # yaw_pwr_controller.last, no unit; 1.0 = 400 us before limits
+  # The names copy the firmware's labels. Orientation and rates are in the IMU
+  # board's own frame (Adafruit's Z-Y-X quaternion conversion,
+  # new_ctl.ino:279-291). The rate columns are the raw gyro axes under the
+  # sketch's own names, which fit only a board with X vertical, so they map to
+  # gyro X, Y and Z whatever their names say (BENCH_SETUP_PLAN finding 6).
+  nav:
+    depth:
+      depth_m: depth_m
+      depth_m_s: depth_m_s
+    orientation:
+      roll_deg: roll_deg
+      pitch_deg: pitch_deg
+      yaw_deg: yaw_deg
+      gyro_x_deg_s: yaw_deg_s
+      gyro_y_deg_s: pitch_deg_s
+      gyro_z_deg_s: roll_deg_s
+  # Forwarded in each status for diagnostics, as every value was before
+  raw: [vfl_pwr, vfr_pwr, vbl_pwr, vbr_pwr, hfl_pwr, hfr_pwr, hbl_pwr, hbr_pwr,
+        depth_rate_target_m_s, depth_pwr_out, yaw_rate_target_deg_s, yaw_pwr_out]
+  # Where the IMU board's X and Y arrows point in the ROV. NEPI starts its
+  # imu_mount setting here; the board lies on its side in your ROV
+  # (2026-10-26), so measure it (Handoff/TEST_PLAN.md "Measuring the Signs
+  # and the IMU Mount") and set it here or on NEPI. X_FORWARD_Y_LEFT is a flat
+  # board, which passes the values through unchanged.
+  imu_mount: X_FORWARD_Y_LEFT
+
+# Your video reaches NEPI through FastMJPG (Handoff/VIDEO.md), which your own
+# commands send, so nothing is announced here. To have NEPI list a FastMJPG
+# camera on its link_status, add one entry per NEPI port, for example:
+#   - {name: cam0, transport: fastmjpg, port: 5610}
+cameras: []

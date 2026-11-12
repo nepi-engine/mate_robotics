@@ -1,0 +1,15 @@
+APP_DICT:
+  display_name: UI
+  description: Click a point in an image to move the robot there
+  pkg_name: nepi_app_ui
+  group_name: AUTOMATION
+  config_file: app_ui.yaml
+  app_file: ui_app_node.py
+  node_name: app_ui
+  license_type: 3-clause BSD
+  license_link: https://opensource.org/licenses/BSD-3-Clause
+RUI_DICT:
+  rui_files:
+  - NepiAppUi.js
+  rui_main_file: NepiAppUi.js
+  rui_main_class: NepiAppUi

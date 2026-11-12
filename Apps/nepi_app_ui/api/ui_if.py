@@ -35,7 +35,7 @@ from nepi_interfaces.msg import ImagePixel
 from nepi_interfaces.msg import MgrSystemStatus
 from nepi_interfaces.msg import NavPose
 
-from nepi_app_auto_move.msg import NepiAppAutoMoveStatus
+from nepi_app_ui.msg import NepiAppUiStatus
 
 from nepi_sdk import nepi_sdk
 from nepi_sdk import nepi_utils
@@ -66,14 +66,14 @@ except ImportError:
 SYSTEM_ALL_TOPIC = 'all'
 
 #########################################
-# AutoMove IF
+# Ui IF
 #########################################
 
 # Connect Names
 #
 # One connect name per connect IF. Each names the <app>/<connect_name> connect
 # namespace that IF owns, and is the exact string the matching Nepi_IF_Connect*
-# component in NepiAppAutoMove.js binds to. Both are declared rather than
+# component in NepiAppUi.js binds to. Both are declared rather than
 # defaulted because the class defaults do not survive contact with a second
 # instance -- every ConnectImageIF would land on ConnectDataIF's 'data_connect'
 # -- so each is passed explicitly to keep the RUI binding unambiguous and
@@ -111,13 +111,13 @@ OBSTACLES_ALL_TOPIC = 'obstacles'
 MOUSE_EVENT_TOPIC = 'image_mouse_event'
 
 # Image data product the image pub node publishes, one per active source.
-OVERLAY_IMG_PRODUCT = 'auto_move_image'
+OVERLAY_IMG_PRODUCT = 'ui_image'
 
 # Node file for the overlay image publisher this IF launches. It installs into
 # the app package's lib folder via catkin_install_python, which sits beside the
 # nepi_api lib folder reported by nepi_system.get_system_folders().
-IMG_PUB_PKG_NAME = 'nepi_app_auto_move'
-IMG_PUB_NODE_FILE = 'auto_move_app_img_pub_node.py'
+IMG_PUB_PKG_NAME = 'nepi_app_ui'
+IMG_PUB_NODE_FILE = 'ui_app_img_pub_node.py'
 
 # Overlay transparency, 0.0 fully opaque through 1.0 invisible. The image pub
 # node blends at (1.0 - transparency).
@@ -205,19 +205,19 @@ GOTO_STEP_TIMEOUT_SEC = 60
 GOTO_BUSY_WAIT_SEC = 3
 
 
-class AutoMoveIF:
+class UiIF:
 
     namespace = '~'
     all_namespace = None
 
-    status_msg = NepiAppAutoMoveStatus()
+    status_msg = NepiAppUiStatus()
 
     node_if = None
     controls_if = None
     rbx_if = None
     image_if = None
 
-    node_if_prefix = 'auto_move_'
+    node_if_prefix = 'ui_'
 
     # Selected sources
     image_topic = 'None'
@@ -307,7 +307,7 @@ class AutoMoveIF:
     goto_duration_s = 0.0
     rbx_has_goto_velocity = False
 
-    goto_state = NepiAppAutoMoveStatus.GOTO_STATE_IDLE
+    goto_state = NepiAppUiStatus.GOTO_STATE_IDLE
     goto_msg = 'Idle'
     goto_step = 0
     goto_step_count = 0
@@ -342,7 +342,7 @@ class AutoMoveIF:
     active_services = []
 
     api_lib_folder = '/opt/nepi/nepi_engine/lib/nepi_api'
-    img_pub_lib_folder = '/opt/nepi/nepi_engine/lib/nepi_app_auto_move'
+    img_pub_lib_folder = '/opt/nepi/nepi_engine/lib/nepi_app_ui'
     launch_node_process = None
     pub_img_node_name = ""
     pub_img_namespace = ""
@@ -371,7 +371,7 @@ class AutoMoveIF:
             self.msg_if = msg_if
         else:
             self.msg_if = MsgIF()
-        self.msg_if.pub_debug("Starting AutoMove IF Initialization Processes")
+        self.msg_if.pub_debug("Starting Ui IF Initialization Processes")
 
         ##############################
         # Init Class Variables
@@ -419,7 +419,7 @@ class AutoMoveIF:
 
         # Params Config Dict ####################
         # NOTE: for params the registry key IS the wire name (namespace + key),
-        # so the auto_move_ prefix is deliberate and load-bearing, not just
+        # so the ui_ prefix is deliberate and load-bearing, not just
         # collision insurance.
         self.PARAMS_DICT = {
             self.node_if_prefix + 'max_move_m': {
@@ -450,7 +450,7 @@ class AutoMoveIF:
         # Pubs Config Dict ####################
         self.PUBS_DICT = {
             self.node_if_prefix + 'status_pub': {
-                'msg': NepiAppAutoMoveStatus,
+                'msg': NepiAppUiStatus,
                 'namespace': self.namespace,
                 'topic': 'status',
                 'qsize': 1,
@@ -689,7 +689,7 @@ class AutoMoveIF:
         self.controls_dict = copy.deepcopy(controls_dict)
         self.controls_if = ControlsIF(
                         controls_name = CONTROLS_NAME,
-                        controls_display_name = 'Auto Move Controls',
+                        controls_display_name = 'UI Controls',
                         controls_description = self.description,
                         controls_init_dict = self.controls_dict,
                         msg_if = self.msg_if)
@@ -805,7 +805,7 @@ class AutoMoveIF:
         return velocity_dict
 
     def launch_image_pub_node(self):
-        """Launch the auto move overlay image publisher node as a subprocess.
+        """Launch the UI overlay image publisher node as a subprocess.
 
         Resolves the image publisher node file path in the app's lib folder and
         starts it in the parent namespace so its own node namespace is
@@ -825,7 +825,7 @@ class AutoMoveIF:
         elif os.path.exists(node_file_path) == False:
             self.msg_if.pub_warn("Could not find Node File at: " + node_file_path)
         else:
-            self.msg_if.pub_info("Launching Auto Move Img Node with settings " + str([IMG_PUB_PKG_NAME, IMG_PUB_NODE_FILE, node_name]))
+            self.msg_if.pub_info("Launching UI Img Node with settings " + str([IMG_PUB_PKG_NAME, IMG_PUB_NODE_FILE, node_name]))
             [success, msg, sub_process] = nepi_sdk.launch_node(IMG_PUB_PKG_NAME, IMG_PUB_NODE_FILE, node_name, namespace = launch_namespace)
             if success == True:
                 self.launch_node_process = sub_process
@@ -834,7 +834,7 @@ class AutoMoveIF:
             self.msg_if.pub_info("Node launch return msg: " + str(msg))
 
     def kill_image_pub_node(self):
-        """Terminate the running auto move overlay image publisher node.
+        """Terminate the running UI overlay image publisher node.
 
         Sends a kill signal to the subprocess started by
         ``launch_image_pub_node`` and clears the process handle and node name
@@ -859,12 +859,12 @@ class AutoMoveIF:
                 self.node_if.save_config()
 
     def publish_status(self):
-        """Assemble and publish the auto move status message.
+        """Assemble and publish the UI status message.
 
         Populates every field from current internal state and publishes on
         ``<app>/status``.
         """
-        status_msg = NepiAppAutoMoveStatus()
+        status_msg = NepiAppUiStatus()
 
         status_msg.rbx_connect_namespace = self.get_connect_namespace(RBX_CONNECT_NAME)
         status_msg.rbx_namespace = self.rbx_namespace
@@ -1150,7 +1150,7 @@ class AutoMoveIF:
             return
 
         source_subs_dict = {
-            'auto_move_depth_map_sub': {
+            'ui_depth_map_sub': {
                     'namespace': self.depth_map_topic,
                     'msg': Image,
                     'topic': '',
@@ -1158,7 +1158,7 @@ class AutoMoveIF:
                     'callback': self.depthMapCb,
                     'callback_args': ()
             },
-            'auto_move_depth_map_status_sub': {
+            'ui_depth_map_status_sub': {
                     'namespace': self.depth_map_topic,
                     'msg': DepthMapStatus,
                     'topic': 'status',
@@ -1210,7 +1210,7 @@ class AutoMoveIF:
             return
 
         robot_subs_dict = {
-            'auto_move_robot_navpose_sub': {
+            'ui_robot_navpose_sub': {
                     'namespace': navpose_topic,
                     'msg': NavPose,
                     'topic': '',
@@ -1745,12 +1745,12 @@ class AutoMoveIF:
         self.cancelGoto()
 
     def startGoto(self):
-        if self.goto_state == NepiAppAutoMoveStatus.GOTO_STATE_PLANNING or \
-                self.goto_state == NepiAppAutoMoveStatus.GOTO_STATE_MOVING:
+        if self.goto_state == NepiAppUiStatus.GOTO_STATE_PLANNING or \
+                self.goto_state == NepiAppUiStatus.GOTO_STATE_MOVING:
             self.msg_if.pub_warn("Goto already running")
             return
         if self.rbx_if is None or self.rbx_connected == False:
-            self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_IDLE
+            self.goto_state = NepiAppUiStatus.GOTO_STATE_IDLE
             self.goto_msg = 'No robot connected'
             self.msg_if.pub_warn("Goto ignored: no robot connected")
             self.publish_status()
@@ -1763,7 +1763,7 @@ class AutoMoveIF:
         # success and do nothing.
         self.updateRbxCapabilities()
         if self.goto_velocity_enabled == True and self.rbx_has_goto_velocity == False:
-            self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_IDLE
+            self.goto_state = NepiAppUiStatus.GOTO_STATE_IDLE
             self.goto_msg = 'Connected robot does not support velocity moves'
             self.msg_if.pub_warn("Velocity goto ignored: selected robot reports no goto_velocity capability")
             self.publish_status()
@@ -1775,7 +1775,7 @@ class AutoMoveIF:
         self.goto_step_count = 0
         self.goto_step_issued = False
         self.goto_saw_busy = False
-        self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_PLANNING
+        self.goto_state = NepiAppUiStatus.GOTO_STATE_PLANNING
         self.goto_msg = 'Planning move'
         self.publish_status()
 
@@ -1828,19 +1828,19 @@ class AutoMoveIF:
         self.goto_step = 0
         self.goto_step_count = 0
         self.goto_step_issued = False
-        self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_CANCELLED
+        self.goto_state = NepiAppUiStatus.GOTO_STATE_CANCELLED
         self.goto_msg = 'Cancelled by operator'
         self.publish_status()
 
     def gotoProcessCb(self, timer):
         try:
-            if self.goto_state == NepiAppAutoMoveStatus.GOTO_STATE_PLANNING:
+            if self.goto_state == NepiAppUiStatus.GOTO_STATE_PLANNING:
                 self.runPlanning()
-            elif self.goto_state == NepiAppAutoMoveStatus.GOTO_STATE_MOVING:
+            elif self.goto_state == NepiAppUiStatus.GOTO_STATE_MOVING:
                 self.runMoving()
         except Exception as e:
             self.msg_if.pub_warn("Goto process failed: " + str(e), throttle_s = 5.0)
-            self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_IDLE
+            self.goto_state = NepiAppUiStatus.GOTO_STATE_IDLE
             self.goto_msg = 'Goto process failed: ' + str(e)
             self.publish_status()
 
@@ -1878,7 +1878,7 @@ class AutoMoveIF:
         planner = self.planMove
         if self.goto_velocity_enabled == True:
             if self.planVelocityMove is None:
-                self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_IDLE
+                self.goto_state = NepiAppUiStatus.GOTO_STATE_IDLE
                 self.goto_msg = 'Velocity mode is on but this node has no velocity planner'
                 self.publish_status()
                 return
@@ -1893,7 +1893,7 @@ class AutoMoveIF:
                        copy.deepcopy(self.obstacles_list))
 
         if plan is None or len(plan) == 0:
-            self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_COMPLETE
+            self.goto_state = NepiAppUiStatus.GOTO_STATE_COMPLETE
             self.goto_msg = 'Planner returned no moves'
             self.publish_status()
             return
@@ -1903,7 +1903,7 @@ class AutoMoveIF:
         self.goto_step_count = len(plan)
         self.goto_step_issued = False
         self.goto_saw_busy = False
-        self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_MOVING
+        self.goto_state = NepiAppUiStatus.GOTO_STATE_MOVING
         self.goto_msg = 'Executing move 1 of ' + str(self.goto_step_count)
         self.publish_status()
 
@@ -1913,13 +1913,13 @@ class AutoMoveIF:
             return
 
         if self.rbx_if is None or self.rbx_connected == False:
-            self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_IDLE
+            self.goto_state = NepiAppUiStatus.GOTO_STATE_IDLE
             self.goto_msg = 'Lost robot connection during move'
             self.publish_status()
             return
 
         if self.goto_step >= self.goto_step_count:
-            self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_COMPLETE
+            self.goto_state = NepiAppUiStatus.GOTO_STATE_COMPLETE
             self.goto_msg = 'Move complete'
             self.publish_status()
             return
@@ -1969,7 +1969,7 @@ class AutoMoveIF:
             # as done rather than left to time out.
             step_done = True
         elif elapsed > GOTO_STEP_TIMEOUT_SEC:
-            self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_IDLE
+            self.goto_state = NepiAppUiStatus.GOTO_STATE_IDLE
             self.goto_msg = 'Move step ' + str(self.goto_step + 1) + ' timed out'
             self.publish_status()
             return
@@ -1979,7 +1979,7 @@ class AutoMoveIF:
             self.goto_step_issued = False
             self.goto_saw_busy = False
             if self.goto_step >= self.goto_step_count:
-                self.goto_state = NepiAppAutoMoveStatus.GOTO_STATE_COMPLETE
+                self.goto_state = NepiAppUiStatus.GOTO_STATE_COMPLETE
                 self.goto_msg = 'Move complete'
             self.publish_status()
 

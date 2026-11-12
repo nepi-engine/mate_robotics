@@ -19,23 +19,23 @@ import time
 
 from std_msgs.msg import Bool, Empty, String, Float32
 
-from nepi_app_auto_move.msg import NepiAppAutoMoveStatus
+from nepi_app_ui.msg import NepiAppUiStatus
 
 from nepi_sdk import nepi_sdk
 
 from nepi_api.messages_if import MsgIF
 from nepi_api.connect_node_if import ConnectNodeClassIF
 
-APP_NODE_NAME = 'app_auto_move'
+APP_NODE_NAME = 'app_ui'
 
-# Connect names, matching the connect_name each connect IF in AutoMoveIF is
+# Connect names, matching the connect_name each connect IF in UiIF is
 # constructed with. Selecting a robot or an image means publishing a String to
 # <app>/<connect_name>/select_topic, which is what the RUI selectors do.
 RBX_CONNECT_NAME = 'rbx_connect'
 IMAGE_CONNECT_NAME = 'image_connect'
 
 
-class ConnectAppAutoMove:
+class ConnectAppUi:
     msg_if = None
     ready = False
     namespace = '~'
@@ -47,7 +47,7 @@ class ConnectAppAutoMove:
     status_connected = False
 
     # Optional consumer callback, invoked from _statusCb with the status dict.
-    # The auto move app publishes no data product this interface subscribes to,
+    # The UI app publishes no data product this interface subscribes to,
     # so the status dict IS the data dict here.
     dataCB = None
 
@@ -237,7 +237,7 @@ class ConnectAppAutoMove:
             'status_sub': {
                 'namespace': self.namespace,
                 'topic': 'status',
-                'msg': NepiAppAutoMoveStatus,
+                'msg': NepiAppUiStatus,
                 'qsize': 1,
                 'callback': self._statusCb
             }
@@ -284,7 +284,7 @@ class ConnectAppAutoMove:
         return self.status_connected
 
     def get_status_dict(self):
-        """Return the last received NepiAppAutoMoveStatus message as a dictionary.
+        """Return the last received NepiAppUiStatus message as a dictionary.
 
         Returns:
             dict: The status message converted to a dict, or None if no status
@@ -295,10 +295,10 @@ class ConnectAppAutoMove:
         return None
 
     def get_status_msg(self):
-        """Return the last received NepiAppAutoMoveStatus message.
+        """Return the last received NepiAppUiStatus message.
 
         Returns:
-            NepiAppAutoMoveStatus: The most recent status message, or None if no
+            NepiAppUiStatus: The most recent status message, or None if no
                 status message has arrived yet.
         """
         return self.status_msg

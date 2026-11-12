@@ -30,7 +30,7 @@ from sensor_msgs.msg import Image
 from nepi_interfaces.msg import ImageStatus
 from nepi_interfaces.msg import Targets
 
-from nepi_app_auto_move.msg import NepiAppAutoMoveStatus
+from nepi_app_ui.msg import NepiAppUiStatus
 
 from nepi_sdk import nepi_sdk
 from nepi_sdk import nepi_utils
@@ -42,7 +42,7 @@ from nepi_api.system_if import SaveDataIF
 from nepi_api.data_if import ColorImageIF
 
 
-# The obstacle overlay layer is optional, exactly as in auto_move_if.py: without
+# The obstacle overlay layer is optional, exactly as in ui_if.py: without
 # nepi_app_obstacles installed there is no Obstacles message to import, the
 # subscriber is never created and the layer draws nothing.
 try:
@@ -94,12 +94,12 @@ DEFAULT_DEPTH_MAP_TRANSPARENCY = 0.5
 MAX_IMAGE_PUB_RATE_HZ = 10.0
 
 # Image data product this node publishes. Must match OVERLAY_IMG_PRODUCT in
-# auto_move_if.py; that class only reports where this topic will appear, this
+# ui_if.py; that class only reports where this topic will appear, this
 # node owns the publisher.
-OVERLAY_IMG_PRODUCT = 'auto_move_image'
+OVERLAY_IMG_PRODUCT = 'ui_image'
 
 
-class AutoMoveImgPub:
+class UiImgPub:
 
     OVERLAY_IMG_DATA_PRODUCT = OVERLAY_IMG_PRODUCT
 
@@ -175,7 +175,7 @@ class AutoMoveImgPub:
     overlay_labels = True
     overlay_range_bearing = True
 
-    DEFAULT_NODE_NAME = "auto_move_img_pub"  # Can be overwritten by launch command
+    DEFAULT_NODE_NAME = "ui_img_pub"  # Can be overwritten by launch command
 
     def __init__(self):
         ####  NODE INIT SETUP ####
@@ -221,8 +221,8 @@ class AutoMoveImgPub:
 
         # Subs Config Dict ####################
         self.SUBS_DICT = {
-            'auto_move_status_sub': {
-                'msg': NepiAppAutoMoveStatus,
+            'ui_status_sub': {
+                'msg': NepiAppUiStatus,
                 'namespace': self.app_namespace,
                 'topic': 'status',
                 'qsize': 10,
@@ -230,7 +230,7 @@ class AutoMoveImgPub:
                 'callback_args': ()
             },
 
-            'auto_move_all_targets_sub': {
+            'ui_all_targets_sub': {
                 'msg': Targets,
                 'namespace': self.all_namespace,
                 'topic': 'targets',
@@ -241,7 +241,7 @@ class AutoMoveImgPub:
         }
 
         if HAS_OBSTACLES_MSG == True:
-            self.SUBS_DICT['auto_move_all_obstacles_sub'] = {
+            self.SUBS_DICT['ui_all_obstacles_sub'] = {
                 'msg': Obstacles,
                 'namespace': self.all_namespace,
                 'topic': 'obstacles',
@@ -1179,4 +1179,4 @@ class AutoMoveImgPub:
 # Main
 #########################################
 if __name__ == '__main__':
-    AutoMoveImgPub()
+    UiImgPub()

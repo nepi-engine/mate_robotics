@@ -1,4 +1,4 @@
-# This message details the AutoMove App Status Msg
+# This message details the Ui App Status Msg
 #
 # The app publishes this once per status cycle on <app>/status. Every command
 # topic the app subscribes to hangs off that same <app> namespace, so a consumer

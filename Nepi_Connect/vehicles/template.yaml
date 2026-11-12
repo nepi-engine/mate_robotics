@@ -1,0 +1,136 @@
+# NEPI Connect vehicle file template.
+#
+# One vehicle file describes one robot to NEPI Connect: how to reach NEPI,
+# which of the robot's inputs NEPI may drive and how, what telemetry the robot
+# prints, and which cameras it streams. The robot announces this description
+# to NEPI, and NEPI builds its driver from it, so connecting a new robot needs
+# this file and no new NEPI code. Nepi_Connect/VEHICLE_FILE.md explains every
+# key, its default and its limits. vehicles/mate_coral_crusaders.yaml is a
+# complete, working example.
+#
+# The robot looks for its vehicle file in this order, and the first one found
+# wins:
+#   1. the path in the NEPI_CONNECT_VEHICLE environment variable
+#   2. nepi_connect_vehicle.yaml beside nepi_link.py (the hooks file)
+#   3. ~/nepi_connect/config/nepi_connect_vehicle.yaml
+#
+# Any invalid value turns the link off and prints one message naming the key.
+# The robot then runs exactly as it does without NEPI. PyYAML must be
+# installed: sudo apt install python3-yaml
+#
+# This template describes a robot driven by a Linux gamepad read with evdev.
+# Replace every value with your robot's own.
+
+vehicle:
+  # 1 to 24 characters: lowercase letters, digits or _, starting with a
+  # letter. NEPI names the robot's driver and devices after it.
+  name: my_robot
+  # Free text that NEPI shows, such as ROV, USV or rover. Up to 32 characters.
+  kind: rover
+
+network:
+  # NEPI's address. Empty turns the link off: no network traffic at all, and
+  # the pilot's inputs pass through untouched. Demands from any other address
+  # are dropped.
+  nepi_ip: ''
+  # The port on NEPI that status and vehicle messages go to. It must equal the
+  # status_port option of NEPI's NEPI Connect driver. Default 5700.
+  status_port: 5700
+  # The port on the robot that NEPI's demands arrive on. NEPI reads it from
+  # the vehicle message, so there is nothing to match on NEPI. Default 5701.
+  demand_port: 5701
+
+control:
+  # How NEPI Connect reaches the robot's inputs. Only "hooks" exists: the
+  # robot's own control loop calls the hook functions in nepi_link.py.
+  adapter: hooks
+
+  # The input the pilot presses to hand the robot to NEPI, and again to take
+  # it back. It cannot be an axis input, a servo input or a reserved input.
+  toggle_input: BTN_TR
+
+  # The pilot takes the robot back at once by moving any axis input to or
+  # past this share of its travel. Above 0, at most 1. Each input's takeover
+  # point must land past its dead zone. Default 0.25.
+  takeover_fraction: 0.25
+
+  # Inputs NEPI must never use, such as a mode button your robot's code reads.
+  # They pass through from the pilot. Default none.
+  reserved_inputs: []
+
+  # Every input your control loop hands the robot, by name. slot is its
+  # position in the inputs list or tuple. min and max are its raw range and
+  # neutral its resting value. deadzone is how far from neutral your robot's
+  # own code starts to act on it; the pilot holds an input while
+  # |value - neutral| >= deadzone. label is an optional short name for
+  # messages, such as RB; it defaults to the input's name.
+  inputs:
+    ABS_X:     {slot: 0, min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: LX}
+    ABS_Y:     {slot: 1, min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: LY}
+    ABS_RX:    {slot: 2, min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: RX}
+    ABS_RY:    {slot: 3, min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: RY}
+    ABS_Z:     {slot: 4, min: 0, neutral: 0, max: 1023, deadzone: 40, label: LT}
+    ABS_RZ:    {slot: 5, min: 0, neutral: 0, max: 1023, deadzone: 40, label: RT}
+    BTN_SOUTH: {slot: 6, min: 0, neutral: 0, max: 1, deadzone: 1, label: A}
+    BTN_TR:    {slot: 7, min: 0, neutral: 0, max: 1, deadzone: 1, label: RB}
+
+  # The axes NEPI may drive, any of surge, sway, heave and yaw. NEPI's demand
+  # follows FRD: surge positive forward, sway positive right, heave positive
+  # down, yaw positive clockwise seen from above.
+  #   kind:   stick (one input, both directions) or trigger_pair (two
+  #           inputs, the first for positive demands, the second for
+  #           negative ones)
+  #   input:  the stick's input; inputs: [positive, negative] for a pair
+  #   sign:   1 or -1, so a positive demand moves the robot the FRD way.
+  #           Measure it: push the input and see which way the robot goes.
+  #   cap:    0 to 1, the largest demand the robot accepts on this axis. 0
+  #           keeps the axis at neutral.
+  # An axis you leave out stays the pilot's alone, and NEPI never sends it.
+  axes:
+    surge: {kind: stick, input: ABS_Y, sign: -1, cap: 0.2}
+    sway:  {kind: stick, input: ABS_X, sign: 1, cap: 0.2}
+    heave: {kind: stick, input: ABS_RY, sign: 1, cap: 0.2}
+    yaw:   {kind: trigger_pair, inputs: [ABS_Z, ABS_RZ], sign: 1, cap: 0.1}
+
+  # Up to four servos your robot's code already moves from an input, such as
+  # a claw on a button. NEPI writes the input; it never drives the servo
+  # itself. Each name is 1 to 16 lowercase letters, digits or _, starting
+  # with a letter. min, neutral, max and deadzone default to the input's own
+  # and may be given to override them. The pilot's own input wins whenever
+  # the pilot holds it. Default none.
+  #   servos:
+  #     claw: {input: BTN_SOUTH}
+  servos: {}
+
+# What the robot prints, so NEPI can show depth and orientation. Leave the
+# whole section out if the robot prints nothing NEPI should read.
+#
+# telemetry:
+#   format: csv_line            # the only format: one comma-separated line
+#   prefix: '$TLM'              # the line's first value; '' for none
+#   trailer: '^\*[0-9A-Fa-f]{2}$'   # a regular expression for the line's last
+#                               # value, such as a checksum; '' for none
+#   fields:                     # every value after the prefix, in order
+#     - {name: depth_m, type: float}
+#     - {name: depth_m_s, type: float}
+#     - {name: battery_mv, type: int}
+#   nav:                        # standard names, each group all or nothing
+#     depth:
+#       depth_m: depth_m        # standard name: your field name
+#       depth_m_s: depth_m_s
+#     # orientation needs roll_deg, pitch_deg, yaw_deg, gyro_x_deg_s,
+#     # gyro_y_deg_s and gyro_z_deg_s
+#   raw: [battery_mv]           # extra fields NEPI shows as they are
+#   imu_mount: X_FORWARD_Y_LEFT # where the IMU board's X and Y arrows point
+
+# Cameras NEPI can show. NEPI lists each one's address on the driver's
+# link_status topic; add it to NEPI's network stream camera driver by hand.
+#   transport http:     the NEPI Connect service streams a USB camera with
+#                       ustreamer. device is a /dev/v4l/by-path/... path, or
+#                       '' for the first USB camera found. resolution and fps
+#                       pick one of the camera's MJPEG modes.
+#   transport fastmjpg: your own FastMJPG command sends to this NEPI port.
+#                       Announced only; the service starts nothing for it.
+# Up to four cameras, each name 1 to 16 lowercase letters, digits or _.
+cameras:
+  - {name: main, transport: http, port: 8080, device: '', resolution: 1280x720, fps: 30}

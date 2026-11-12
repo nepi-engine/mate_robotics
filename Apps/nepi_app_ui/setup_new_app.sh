@@ -37,10 +37,10 @@
 # prefix. This one value drives every derived name below.
 #   e.g. "nav_sim"  ->  package nepi_app_nav_sim, node app_nav_sim,
 #                       class NepiNavSimApp, msg NepiAppNavSimStatus, ...
-APP_SUFFIX="auto_move"
+APP_SUFFIX="ui"
 
 # Human-friendly name shown in the RUI app menu.   e.g. "NavPose Sim"
-DISPLAY_NAME="Auto Move App"
+DISPLAY_NAME="UI App"
 
 # One-line description (package.xml <description> + params display_name area).
 DESCRIPTION="Auto move with obstacle avoidance application"

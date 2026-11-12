@@ -1,246 +1,238 @@
-# NEPI Link Protocol, Version 1
+# NEPI Connect Link Protocol, Version 2
 
 ## Summary
 
-This is the wire contract between the Coral Crusaders' ROV Pi and a NEPI computer on the same network. It has three parts: a status message from the Pi to NEPI, a demand message from NEPI to the Pi, and a second copy of the camera video. [README.md](README.md) explains why the link is built this way and how to test it. This file covers only what each side must implement.
+This is the wire contract between a robot and a NEPI computer on the same network. It has four parts: a vehicle message, in which the robot describes itself; a status message from the robot to NEPI; a demand message from NEPI to the robot; and, optionally, a copy of the robot's camera video.
 
-Code references point to the team's repository (github.com/CoralCrusaders/rov-26) at commit `1af4984`, unless they name a NEPI repository.
+The robot side is the `nepi_connect` package in `pi/`, set up by the robot's vehicle file ([VEHICLE_FILE.md](VEHICLE_FILE.md)). The NEPI side is the `rbx_nepi_connect` driver in `Drivers/rbx_drivers/`. Neither side holds anything specific to one robot: the robot announces what it is, and NEPI builds its driver from that announcement. [README.md](README.md) explains why the link is built this way and how to test it. This file covers only what each side must implement.
+
+Version 2 replaced version 1 in a single cutover on 2026-11-11. Neither side accepts version 1, so the robot and the NEPI driver must update together. "Changes from Version 1" at the end lists what moved.
 
 ## Terms
 
-- **ROV Pi, Teensy**: the Raspberry Pi inside the robot, and the microcontroller it talks to over USB serial. The Teensy reads the sensors and drives the thrusters.
-- **NEPI, driver**: NEPI is the edge-computing software on the topside NEPI computer. A NEPI driver is the part that talks to one device, here the ROV.
-- **FastMJPG, JPEG**: FastMJPG is the team's video tool. It sends video as a series of JPEG pictures over its own UDP format.
+- **Robot, NEPI, driver**: the robot is the vehicle the pilot drives; it runs `nepi_connect` on its own computer. NEPI is the edge-computing software on a separate NEPI computer. A NEPI driver is the part of NEPI that talks to one device, here the robot.
+- **Vehicle file**: the YAML file on the robot that describes it ([VEHICLE_FILE.md](VEHICLE_FILE.md)).
+- **Input**: one value the robot's control code reads from the pilot's controller, such as a stick axis or a button. An *axis input* carries one of the four movement axes. The *toggle input* hands the robot to NEPI and back.
+- **Pilot, NEPI control**: the pilot drives the robot from its own controller. In *NEPI control*, NEPI drives the robot's axes instead. Only the pilot turns NEPI control on.
+- **Adapter**: the part of `nepi_connect` that reaches the robot's inputs. The hooks adapter is called from the robot's own control loop.
 - **Hz**: times per second. **UTF-8**: the standard way to store text as bytes.
-- **Slow mode**: the team's LB-button toggle that halves stick power on the Teensy.
 - **UDP**: a way to send one short message, called a *datagram*, across a network. It is fast and needs no connection. A datagram can be lost or arrive out of order, and nothing resends it.
 - **JSON**: a plain-text format for named values, such as `{"surge": 0.1}`.
-- **Sequence number (`seq`)**: a counter the sender increases by 1 on every message. The receiver uses it to spot old or repeated messages.
-- **Timeout**: a rule that treats data as missing once it is older than a set age. A *watchdog* is the code that enforces it. Here, a timeout hands the robot back to the pilot alone.
-- **Dead zone**: the range around the center of a stick or trigger that the firmware treats as zero, so a resting stick does nothing.
-- **Surge, sway**: moving forward or back (surge), and sideways (sway).
-- **Yaw, pitch, roll**: turning left or right (yaw; its angle is the *heading*), tipping nose up or down (pitch), and tilting side to side (roll).
-- **Assist**: NEPI's position and heading hold. The pilot turns it on and off with one button.
-- **Bridge**: the `nepi_link.py` module on the Pi, which implements the Pi side of this document.
+- **Sequence number (`seq`)**: a counter the sender increases by 1 on every message of one type. The receiver uses it to spot old or repeated messages.
+- **Timeout**: a rule that treats data as missing once it is older than a set age. Here, a timeout hands the robot back to the pilot alone.
+- **Dead zone**: the range around an input's neutral that the robot's own code treats as neutral, so a resting stick does nothing.
+- **Surge, sway, heave, yaw**: moving forward or back (surge), sideways (sway), down or up (heave), and turning left or right (yaw).
+- **FRD**: forward, right, down, the axis convention of this protocol (see "Axes").
 
 ## Addresses and Ports
 
 | What | Protocol | From | To | Rate |
 |---|---|---|---|---|
-| Status | UDP, JSON | ROV Pi, any port | `NEPI_LAN_IP`, port 5700 | 10 Hz, always |
-| Demand | UDP, JSON | NEPI, any port | ROV Pi `192.168.68.22`, port 5701 | 10 Hz while assist is on |
-| Video, camera N | UDP, FastMJPG | ROV Pi, port 5610+N | `NEPI_LAN_IP`, port 5600+N | camera frame rate |
+| Vehicle | UDP, JSON | Robot, any port | NEPI, the vehicle file's `status_port` (default 5700) | Once at start, then every 0.5 s |
+| Status | UDP, JSON | Robot, any port | NEPI, the same port | 10 Hz, always |
+| Demand | UDP, JSON | NEPI, any port | Robot, the announced `demand_port` (default 5701) | 10 Hz while the link is up |
+| Video | HTTP or FastMJPG | Robot | NEPI | camera frame rate (see "Video to NEPI") |
 
-The team's ports are UDP 5600 to 5604 for video and TCP 10110 for control (`config.yaml:4-10`). Ports 5700, 5701 and 5610 to 5614 appear nowhere in the team's code. Video to NEPI reuses the numbers 5600+N because it goes to a different address.
-
-## Pi Configuration
-
-The bridge reads these new keys from the team's `config.yaml`. No script reads that file today; each one hardcodes its addresses (`rpi/modes/main.py:10-11`). So the bridge opens the file itself. If `NEPI_LAN_IP` is missing or empty, the bridge does nothing, and the robot behaves exactly as it does today.
-
-```yaml
-NEPI_LAN_IP: ''             # a free address the team chooses; empty = link off
-NEPI_STATUS_UDP_PORT: 5700
-NEPI_DEMAND_UDP_PORT: 5701
-NEPI_ASSIST_BUTTON: BTN_TR  # RB, pending team confirmation
-NEPI_MAX_SURGE: 0.2         # Pi-side cap on each demand, 0 to 1
-NEPI_MAX_SWAY: 0.2
-NEPI_MAX_YAW: 0.1
-NEPI_SURGE_SIGN: 1          # +1 or -1, measured on the bench (README, Phase 3)
-NEPI_SWAY_SIGN: 1
-NEPI_YAW_SIGN: 1
-NEPI_TRIGGER_DEADZONE: 10   # must equal TRIGGER_DEADZONE_CONST in the deployed sketch
-NEPI_TRIGGER_MAX: 255       # must equal TRIGER_MAGNITUDE in the deployed sketch
-NEPI_SERVO_1_NAME: ''       # a servo NEPI may move, e.g. claw_pitch; empty = unused ("Servos" below)
-NEPI_SERVO_1_INPUT: ''      # the controller input the sketch moves it with, e.g. ABS_HAT0Y
-                            # NEPI_SERVO_2_* to NEPI_SERVO_4_* the same
-```
-
-The stick dead zone is 3000 and full stick is 32767 in both sketches (`mcu/modes/new_ctl/new_ctl.ino:27, 29`). The trigger defaults above come from `new_ctl.ino:28, 30`. The tuning sketch uses 40 and 1023 instead (`mcu/modes/tuning/tuning.ino:28, 30`).
+The vehicle file names NEPI's address (`network.nepi_ip`). NEPI's driver names the robot's address in its `host` option, and its `status_port` option must equal the vehicle file's `network.status_port`. The demand port reaches NEPI in the vehicle message, so there is nothing to match for it.
 
 ## Rules for Every Message
 
-1. **Format.** One JSON object per UDP datagram, as UTF-8 text, at most 1200 bytes, so it always fits in one network frame.
+1. **Format.** One JSON object per UDP datagram, as UTF-8 text, at most 1200 bytes, so it always fits in one network frame. The robot checks its own worst case when it loads the vehicle file, and a file that could exceed 1200 bytes is invalid.
 2. **Common fields.** Every message carries these:
 
 | Field | Type, range | Meaning |
 |---|---|---|
-| `v` | integer | Protocol version. This document defines `1`. |
-| `type` | string | `"status"` or `"demand"`. |
-| `seq` | integer, 0 to 4294967295 | Starts at 0 when the sender starts and goes up by 1 per message. |
+| `v` | integer | Protocol version. This document defines `2`. |
+| `type` | string | `"vehicle"`, `"status"` or `"demand"`. |
+| `seq` | integer, 0 to 4294967295 | Goes up by 1 per message of this type from this sender, and wraps from 4294967295 to 0. The robot starts each type at 0. The NEPI driver starts at its wall clock in seconds times 100, wrapped into range, so a restarted driver starts ahead of everything its previous run sent. |
 | `t` | number, seconds | Sender's clock, in seconds since 1970-01-01 UTC. It is for logs and latency checks only. The two clocks are not synchronized, so no rule below uses `t`. |
 
-3. **Malformed datagram.** The receiver drops the whole datagram, counts it, and keeps its last good values when the datagram is not valid JSON, `v` is not 1, `type` is wrong, a field below is missing or has the wrong type, or a number is NaN (not a number), infinite or outside its stated range. A bad datagram must never crash or stop the receiver. Unknown extra fields are ignored, so version 1 can gain fields without breaking either side. Renaming, removing, or changing the meaning of a field requires `v: 2`.
-4. **Out of order.** The receiver drops a datagram whose `seq` is less than or equal to the last accepted `seq`. The exception: if the last accepted datagram arrived more than 1 s ago, any `seq` is accepted, because the sender has probably restarted. At 10 Hz, `seq` would take over 13 years to wrap, so wrapping needs no other rule.
-5. **Source check.** The Pi accepts demands only from `NEPI_LAN_IP`. NEPI accepts status only from `192.168.68.22`.
+3. **Malformed datagram.** The receiver drops the whole datagram, counts it, and keeps its last good values when the datagram is not valid JSON, `v` is not 2, `type` is wrong, a field below is missing or has the wrong type, or a number is NaN (not a number), infinite or outside its stated range. A bad datagram must never crash or stop the receiver. Unknown extra fields are ignored, so version 2 can gain fields without breaking either side. Renaming, removing, or changing the meaning of a field requires `v: 3`.
+4. **Out of order.** For each message type, the receiver drops a datagram whose `seq` is less than or equal to the last accepted `seq` of that type. The exception: if the last accepted datagram of that type arrived more than 1 s ago, any `seq` is accepted, because the sender has probably restarted.
+5. **Source check.** The robot accepts demands only from `network.nepi_ip`. NEPI accepts vehicle and status messages only from its `host` option.
 6. **Ages.** Each receiver measures age on its own clock, from the moment it accepted the datagram.
 
-## Status: Pi to NEPI
+## Vehicle: Robot to NEPI
 
-The bridge sends a status every 100 ms on its own timer, whether or not a new Teensy line has arrived. It may send one extra status immediately when assist changes. NEPI therefore sees a toggle within about 100 ms.
-
-| Field | Type, range | Meaning |
-|---|---|---|
-| `assist` | bool | Assist is on. The toggle state lives on the Pi. |
-| `pilot_surge` | bool | The pilot's LY is outside the stick dead zone. |
-| `pilot_sway` | bool | The pilot's LX is outside the stick dead zone. |
-| `pilot_yaw` | bool | The pilot's LT or RT is outside the trigger dead zone. |
-| `pilot_depth` | bool | The pilot's RY is outside the stick dead zone. |
-| `slow` | bool | The bridge's copy of slow mode, using the Teensy's LB rule (`new_ctl.ino:364-379`). The Teensy does not report slow mode, so this copy can be wrong after a Teensy reset. |
-| `out_lx`, `out_ly` | integer, -32768 to 32767 | LX and LY the bridge last handed to the encoder, after merging. |
-| `out_lt`, `out_rt` | integer, 0 to `NEPI_TRIGGER_MAX` | LT and RT the bridge last handed to the encoder, after merging. |
-| `demand_seq` | integer, -1 or more | `seq` of the last accepted demand; -1 before the first. |
-| `demand_age_ms` | integer, -1 or more | Age of the last accepted demand, in ms; -1 before the first. |
-| `demand_bad` | integer | Demand datagrams dropped since start (malformed, out of order, or wrong sender). |
-| `tn` | object or null | The newest parsed Teensy line (next table); null before the first. |
-| `tn_age_ms` | integer, -1 or more | Age of `tn`, in ms; -1 before the first. |
-| `tn_count` | integer | Teensy lines parsed since start. Its change over time gives the telemetry rate. |
-| `tn_bad` | integer | Teensy lines ignored because they did not start with `$TNCTL,` or did not hold 20 values. |
-| `servos` | object | Each servo in the Pi's configuration ("Servos" below) by name, `true` while the pilot holds its input off neutral. `{}` when none are configured. Added to version 1 on 2026-10-28; an older Pi sends none. |
-
-### Teensy telemetry (`tn`)
-
-The Teensy prints one line every 50 passes through `loop()` (`new_ctl.ino:14, 641-644`), as `$TNCTL,` then 20 comma-separated values, then `,*FF` (`new_ctl.ino:584-629`). The `*FF` is a fixed placeholder, not a checksum. Decimals arrive with 2 digits after the point, which is the Arduino default for printing a `double`. The bridge parses only lines with exactly 20 values. The tuning sketch prints 25 (`tuning.ino:601-656`), so its lines count as `tn_bad`.
-
-| # | Name in `tn` | Firmware value | Unit and range |
-|---|---|---|---|
-| 1-4 | `vfl_pwr`, `vfr_pwr`, `vbl_pwr`, `vbr_pwr` | `thruster_power`, vertical thrusters | µs away from 1500 µs, -400 to 400 (`new_ctl.ino:26, 33`) |
-| 5-8 | `hfl_pwr`, `hfr_pwr`, `hbl_pwr`, `hbr_pwr` | `thruster_power`, horizontal thrusters | same as above |
-| 9 | `depth_m` | `sensor_data.depth_m` | m; 0 at 101300 Pa in fresh water (`MS5837/MS5837.cpp:178`, `new_ctl.ino:233`) |
-| 10 | `depth_m_s` | `sensor_data.depth_m_s` | m/s |
-| 11 | `yaw_deg` | `sensor_data.yaw_deg` | degrees, -180 to 180; slowly drifts (see README) |
-| 12 | `pitch_deg` | `sensor_data.pitch_deg` | degrees, -90 to 90 |
-| 13 | `roll_deg` | `sensor_data.roll_deg` | degrees, -180 to 180 |
-| 14 | `yaw_deg_s` | gyroscope x axis (`new_ctl.ino:387`) | deg/s |
-| 15 | `pitch_deg_s` | gyroscope y axis (`new_ctl.ino:388`) | deg/s |
-| 16 | `roll_deg_s` | gyroscope z axis (`new_ctl.ino:389`) | deg/s |
-| 17 | `depth_rate_target_m_s` | `depth_pwr_controller.target` | requested depth rate, m/s |
-| 18 | `depth_pwr_out` | `depth_pwr_controller.last` | vertical power, no unit; 1.0 = 400 µs before limits |
-| 19 | `yaw_rate_target_deg_s` | `yaw_pwr_controller.target` | requested yaw rate, deg/s |
-| 20 | `yaw_pwr_out` | `yaw_pwr_controller.last` | yaw power, no unit; 1.0 = 400 µs before limits |
-
-The names copy the firmware's labels. Which physical direction each sign means is not known yet; Phase 3 in the README measures it.
-
-Values 11 to 16 are in the IMU board's own frame. The NEPI driver turns them into the ROV's frame with its `imu_mount` setting, and reads 14 to 16 as gyro X, Y and Z whatever their names say (BENCH_SETUP_PLAN finding 6). The driver drops a status whose `tn` lacks any of values 9 to 16.
-
-## Demand: NEPI to Pi
-
-NEPI sends a demand every 100 ms while the link is up, with `active` false while its hold is off, so the Pi can see the rising edge of `active` that turns assist on. That matches the Pi's 0.1 s serial write (`rpi/modes/main.py:84-88`), so sending faster would change nothing.
+The robot sends a vehicle message once when the link starts and then every 0.5 s, to the same port as the status. It never changes while the robot runs: it is built from the vehicle file at start. NEPI's discovery launches the driver only after it hears one valid vehicle message, and builds the driver from it.
 
 | Field | Type, range | Meaning |
 |---|---|---|
-| `active` | bool | NEPI's hold is running and wants these values used. `false` means every axis counts as 0. |
-| `surge` | number, -1 to 1 | Fraction of full left-stick forward travel. Positive = forward. |
-| `sway` | number, -1 to 1 | Fraction of full left-stick sideways travel. Positive = right. |
-| `yaw` | number, -1 to 1 | Fraction of a full trigger pull. Positive = clockwise seen from above (nose turns right). |
-| `pitch` | number, -1 to 1 | Reserved. The Pi ignores it until the Teensy firmware supports pitch. NEPI sends 0. |
-| `roll` | number, -1 to 1 | Reserved, the same as `pitch`. |
-| `servos` | object, name to number -1 to 1 | Optional. The value NEPI wants for each named servo ("Servos" below); 0 is the input's neutral. A name the Pi has no servo for is ignored. No field means no servo values. Added to version 1 on 2026-10-28. |
-
-These values are not speeds. On the Teensy, surge and sway are open-loop power, which means the stick sets thruster power directly and nothing measures the result (`new_ctl.ino:465-477`). A surge demand therefore means "this much stick". Yaw is a rate request: a full trigger asks the Teensy for 180 deg/s (`new_ctl.ino:482`).
+| `name` | string, 1 to 24 characters: lowercase letters, digits or `_`, starting with a letter | The vehicle's name. NEPI names the driver's devices after it. |
+| `kind` | string, up to 32 characters | Free text such as `ROV`. |
+| `demand_port` | integer, 1 to 65535 | The robot's port for demands. |
+| `axes` | object, axis name to number 0 to 1 | Each axis NEPI may drive (`surge`, `sway`, `heave`, `yaw`, at least one), with the robot's cap on it. |
+| `servos` | list of names, at most 4 | Each servo NEPI may move ("Servos" below). Names follow the servo name rule. |
+| `nav` | list of standard names | The navigation values each status carries ("Navigation" below). Empty when the robot sends none. |
+| `raw` | list of names | The extra telemetry values each status carries in `raw`. Empty when none. |
+| `cameras` | list of objects | Each camera, as `{"name", "transport", "port"}`; `transport` is `"http"` or `"fastmjpg"`. At most 4. |
+| `imu_mount` | string | Where the robot's IMU board points; the starting value of the driver's `imu_mount` setting (see the driver's `ImuMount`). |
 
 Example datagram:
 
 ```json
-{"v": 1, "type": "demand", "seq": 812, "t": 1792200000.25, "active": true,
- "surge": 0.06, "sway": -0.03, "yaw": 0.0, "pitch": 0.0, "roll": 0.0}
+{"v": 2, "type": "vehicle", "seq": 0, "t": 1792200000.25, "name": "mate_coral_crusaders", "kind": "ROV",
+ "demand_port": 5701, "axes": {"surge": 0.2, "sway": 0.2, "heave": 0.2, "yaw": 0.1}, "servos": [],
+ "nav": ["depth_m", "depth_m_s", "roll_deg", "pitch_deg", "yaw_deg", "gyro_x_deg_s", "gyro_y_deg_s", "gyro_z_deg_s"],
+ "raw": ["vfl_pwr", "depth_pwr_out"], "cameras": [], "imu_mount": "X_FORWARD_Y_LEFT"}
 ```
 
-## Pi Rules: Toggle, Timeout, Clamp, Override, Mapping
+If a later vehicle message differs from the one the driver was launched with, the robot's file changed. The driver keeps running on the first one and warns once that it must be disabled and enabled to pick up the change.
 
-**Toggle.** A rising edge of `NEPI_ASSIST_BUTTON` (the moment it goes from released to pressed) flips `assist`. The bridge uses the same "button available" pattern as the Teensy's slow mode (`new_ctl.ino:364-372`). Assist is off when the bridge starts. It also turns off by itself if no fresh demand has been accepted for 2 s, counting from the moment assist was turned on. The pilot then presses the button again. The button is still passed to the Teensy unchanged, and no sketch reads it.
+## Status: Robot to NEPI
 
-**Pilot display.** The bridge adds `NEPI:OFF`, `NEPI:ON`, or `NEPI:WAIT` (assist on, but no fresh demand) to the line the Pi already sends the topside, just before `*FF`.
+The robot sends a status every 100 ms on its own timer, whether or not new telemetry has arrived. It sends one extra status at once when NEPI control turns on or off, so NEPI sees a hand-over within about 100 ms.
 
-**Timeout.** A demand older than 250 ms counts as 0 on every axis.
-
-**Clamp.** Before mapping, the bridge limits `|surge|` to `NEPI_MAX_SURGE`, `|sway|` to `NEPI_MAX_SWAY`, and `|yaw|` to `NEPI_MAX_YAW`.
-
-**Override, per axis.** The bridge merges into a copy of the pilot's inputs, never into `gamepad_inputs` itself. While assist is on, the pilot's own input wins on its axis whenever it is outside the dead zone:
-
-| Axis | Pilot wins when | Otherwise the bridge sends |
+| Field | Type, range | Meaning |
 |---|---|---|
-| Surge | `abs(LY) >= 3000` | `LY = stick(surge * NEPI_SURGE_SIGN)` |
-| Sway | `abs(LX) >= 3000` | `LX = stick(sway * NEPI_SWAY_SIGN)` |
-| Yaw | `LT >= NEPI_TRIGGER_DEADZONE` or `RT >= NEPI_TRIGGER_DEADZONE` | With `y = yaw * NEPI_YAW_SIGN`: if `y > 0`, `LT = trigger(y)` and `RT = 0`; if `y < 0`, `LT = 0` and `RT = trigger(-y)`; if `y == 0`, both 0 |
+| `control` | bool | NEPI control is on. The toggle state lives on the robot. |
+| `control_reason` | string | Why `control` last changed: `start`, `pilot_button` (the toggle input), `pilot_stick` (an axis input past its takeover point), `timeout` (2 s with no accepted demand) or `nepi_off` (a demand with `active` false). |
+| `nepi_ready` | bool | A demand with `active` true was accepted within 0.5 s, so the toggle input hands the robot over. |
+| `pilot` | object, axis name to bool | For each announced axis, the pilot holds one of its inputs: \|value − neutral\| ≥ dead zone. |
+| `servos` | object, servo name to bool | For each announced servo, the pilot holds its input. `{}` when there are none. |
+| `out` | object, input name to integer | Each axis input's value the robot last handed on, after merging, limited to that input's range. |
+| `demand_seq` | integer, -1 to 4294967295 | `seq` of the last accepted demand; -1 before the first. |
+| `demand_age_ms` | integer, -1 to 4294967295 | Age of the last accepted demand, in ms; -1 before the first. |
+| `demand_bad` | integer, 0 to 4294967295 | Demand datagrams dropped since start (malformed, out of order, or wrong sender). |
+| `nav` | object or null | The newest navigation values, by standard name ("Navigation" below); null before the first telemetry line, and always null for a robot that announces none. |
+| `nav_age_ms` | integer, -1 to 4294967295 | Age of the newest telemetry line, in ms; -1 before the first. |
+| `nav_count` | integer, 0 to 4294967295 | Telemetry lines parsed since start. Its change over time gives the telemetry rate. |
+| `nav_bad` | integer, 0 to 4294967295 | Telemetry lines ignored because they did not match the vehicle file's line format. |
+| `raw` | object or null | Present only when the vehicle file lists `raw` fields: each by name, from the newest telemetry line; null before the first. |
 
-Every other input (RX, RY and all buttons) passes through from the pilot unchanged, except the servo inputs ("Servos" below). NEPI never supplies RY, so depth stays with the Teensy's depth hold (`new_ctl.ino:426-435`).
+Ages and counters stop at 4294967295 rather than grow without limit, which keeps the status inside its size limit.
 
-**Dead-zone mapping.** The Teensy sets anything inside the dead zone to 0 and passes everything else through without rescaling (`new_ctl.ino:563-582`). So the bridge maps a demand onto the part of the range the Teensy acts on. `TD` is `NEPI_TRIGGER_DEADZONE` and `TM` is `NEPI_TRIGGER_MAX`:
+### Navigation
 
-```
-stick(d)   = 0                                                        if abs(d) < 0.01
-           = sign(d) * round(3000 + (abs(d) - 0.01) / 0.99 * (32767 - 3000))   otherwise
-trigger(m) = 0                                                        if m < 0.01
-           = round(TD + (m - 0.01) / 0.99 * (TM - TD))                otherwise
-```
+The standard names come in two groups, and a robot sends a group whole or not at all:
 
-| Demand | Bridge sends | What the Teensy does |
+| Group | Standard names | Units |
 |---|---|---|
-| surge 0.01 | LY = 3000 | 9% stick |
-| surge 0.2 | LY = 8713 | 27% stick |
-| surge 1.0 | LY = 32767 | full stick |
-| yaw 0.01 | one trigger = 10 | 7.1 deg/s |
-| yaw 0.1 | one trigger = 32 | 22.6 deg/s |
-| yaw 1.0 | one trigger = 255 | 180 deg/s |
+| Depth | `depth_m`, `depth_m_s` | m below the surface, positive down; m/s |
+| Orientation | `roll_deg`, `pitch_deg`, `yaw_deg`, `gyro_x_deg_s`, `gyro_y_deg_s`, `gyro_z_deg_s` | Z-Y-X angles of the IMU board, degrees; rates about the board's X, Y and Z arrows, deg/s |
 
-**Heading hand-off.** While the yaw the bridge sends is 0, the Teensy holds the heading it captured when the triggers last returned to 0 (`new_ctl.ino:484-491`). While NEPI's yaw is nonzero, NEPI's rate request drives the turn. When NEPI's yaw returns to 0, the Teensy captures the heading at that moment and holds it. The smallest nonzero rate is about 7 deg/s.
+Orientation and rates are in the IMU board's own frame. NEPI turns them into the robot's frame with its `imu_mount` setting. NEPI drops a status whose `nav` is an object that lacks any announced standard name, or holds one that is not a finite number.
+
+## Demand: NEPI to Robot
+
+NEPI sends a demand every 100 ms while the link is up. That matches a 10 Hz robot control loop; a robot whose loop is slower simply uses the newest demand.
+
+| Field | Type, range | Meaning |
+|---|---|---|
+| `active` | bool | `true`: NEPI is connected and ready. It does not turn NEPI control on; only the pilot does. `false` ends NEPI control at once (`nepi_off`). |
+| `axes` | object, axis name to number -1 to 1 | The value NEPI wants on each announced axis, as a fraction of the axis's full travel, in FRD. NEPI sends only the announced axes. The robot ignores an axis name it did not announce, and an announced axis that is missing counts as 0. |
+| `servos` | object, servo name to number -1 to 1 | Optional. The value NEPI wants for each named servo ("Servos" below); 0 is the input's neutral. A name the robot has no servo for is ignored. No field means no servo values. |
+
+These values are not speeds. A demand means "this much of the input": what that does is up to the robot's own code, which the vehicle file's comments should say.
+
+Example datagram:
+
+```json
+{"v": 2, "type": "demand", "seq": 3126340889, "t": 1792200000.25, "active": true,
+ "axes": {"surge": 0.06, "sway": -0.03, "heave": 0.0, "yaw": 0.0}, "servos": {}}
+```
+
+## Axes
+
+The protocol uses FRD for every axis value in a demand:
+
+| Axis | Positive means |
+|---|---|
+| `surge` | forward |
+| `sway` | right |
+| `heave` | down |
+| `yaw` | clockwise seen from above (nose turns right) |
+
+ROS, which NEPI is built on, counts sideways as positive to the left, up as positive, and turning as positive counter-clockwise. The NEPI driver maps its teleop command to FRD in one place (`NepiConnectLink.set_teleop_velocity`): surge = x, sway = −y, heave = −z, yaw = −yaw rate, each limited to −1 to 1. The robot applies its own caps and the vehicle file's per-axis signs, which make a positive FRD value move the robot the FRD way.
+
+## Robot Rules: NEPI Control, Timeouts, Caps, Mapping
+
+The robot merges NEPI's demand into a copy of the pilot's inputs, never into the pilot's inputs themselves, just before its control loop hands them on.
+
+**Off at start.** NEPI control is off when the link starts.
+
+**NEPI ready.** NEPI is ready while a demand with `active` true was accepted within 0.5 s.
+
+**Toggle.** Pressing the toggle input, \|value − neutral\| ≥ its dead zone, counts once per press: the input must be released before the next press counts (the "button available" rule). A press turns NEPI control off when it is on (`pilot_button`). When it is off, a press turns it on (`pilot_button`), except that it is ignored while NEPI is not ready, and while any axis input is at or past its takeover point. The toggle input itself passes through to the robot unchanged.
+
+**What NEPI owns.** In NEPI control, NEPI owns every axis input of every announced axis: each carries NEPI's demand, and the pilot's own value is replaced, not mixed in. Inputs that belong to no axis and no servo pass through from the pilot unchanged.
+
+**Takeover (the safety exit).** Any axis input at or past its takeover point ends NEPI control at once (`pilot_stick`). The takeover point is `ceil(takeover_fraction × travel)` away from neutral, where travel is `max − neutral` above neutral and `neutral − min` below it. A side of an input with no travel never takes over. Every takeover point must lie past its input's dead zone, or the vehicle file is invalid.
+
+**Other exits.** NEPI control also ends when the pilot presses the toggle input again, when a demand with `active` false is accepted (`nepi_off`), and after 2 s with no accepted demand (`timeout`). Nothing but the pilot's toggle input turns it back on.
+
+**Stale demand.** A demand older than 250 ms counts as 0 on every axis, so in NEPI control every axis input sits at its neutral until a fresh demand arrives.
+
+**Cap and sign.** Before mapping, the robot limits each axis value to ±its `cap`, then multiplies it by its `sign`.
+
+**Mapping.** A value `d` becomes an input value that lands just past the dead zone for the smallest demand and at the end of the range for a full one. With `n` the input's neutral, `dz` its dead zone and `travel` the side's travel:
+
+```
+stick(d)    = n                                                           if |d| < 0.01
+            = n ± min(travel, round(dz + (|d| − 0.01) / 0.99 × (travel − dz)))   otherwise, + for d > 0
+trigger(m)  = n                                                           if m < 0.01
+            = n + min(travel, round(dz + (m − 0.01) / 0.99 × (travel − dz)))    otherwise
+```
+
+`round` here rounds half up. A `trigger_pair` axis with value `y` writes `trigger(y)` to its first input if `y > 0`, `trigger(−y)` to its second if `y < 0`, and leaves both at neutral if `y = 0`.
+
+**Pilot display.** The hooks adapter's `status_tag()` returns `ON` (NEPI control on, demand fresh), `WAIT` (NEPI control on, demand older than 250 ms), `OFF` (off, NEPI ready, so the toggle hands over) or `NOTREADY` (off, NEPI not connected, so the toggle does nothing), and an empty string while the link is off. The robot's code can show it to the pilot.
+
+**Errors.** Each kind of message prints at most once per 10 s.
 
 ## NEPI Rules
 
-- NEPI treats the link as down when no valid status has arrived for 500 ms. While it is down, NEPI reports the robot as not ready and sends no demands.
-- While the link is up, NEPI sends a demand every 100 ms, always. It sends `active` true while it holds a command from its hold newer than 250 ms and is not latched. Otherwise it sends `active` false with every axis 0.
-- **Latch.** An engagement is an unbroken run of demands with `active` true. While NEPI sends `active` true, a newest status with `assist: false` latches NEPI to `active` false, if assist was on during this engagement (the pilot's button, or the bridge's 2 s timeout) or 0.5 s has passed since the engagement's first `active` true (a link outage, or a restarted bridge, which ignores a first `active` true). A stop command on NEPI also sets the latch. It clears only after NEPI's hold has sent no command for 1 s, so engaging again takes a fresh request. NEPI never turns assist back on by itself.
-- ROS, which NEPI is built on, counts sideways as positive to the left and turning as positive counter-clockwise. This protocol uses right and clockwise. The NEPI driver flips both signs, in one place.
-- NEPI never sends a nonzero `pitch` or `roll` in version 1.
+- NEPI treats the link as down when no valid status has arrived for 500 ms. While it is down, NEPI sends no demands, so the robot counts NEPI as not ready and ignores the toggle input.
+- While the link is up, NEPI sends a demand every 100 ms with `active` true. Only handing the robot back (`release_to_pilot`) sends `active` false, once; the demands after it are `active` true again, so the pilot can hand the robot over again.
+- The demand carries the newest teleop command while NEPI control is on and the command is no older than 500 ms. Otherwise every axis is 0. While NEPI control is off the stored command is dropped, so a hand-over always starts from neutral.
+- Teleop is ready while the link is up and NEPI control is on, so NEPI accepts teleop commands exactly while it has the robot.
+- Stop clears the stored command, so the demands go neutral; NEPI keeps the robot.
+- The robot state is `PILOT` or `NEPI`, who has the robot. Setting `PILOT` hands it back (`release_to_pilot`). Setting `NEPI` is refused, since only the pilot's toggle input hands it over.
+- The driver offers only the announced axes: it reports roll and pitch control as unavailable always, and sends only announced axes.
 
 ## Servos
 
-NEPI can move up to four servos that the team's sketch already moves from a controller input, such as the claw's. NEPI never drives a servo's pulses, and the team's code does not change: the bridge writes the input, the same way it writes the movement inputs. Added on 2026-10-28.
+NEPI can move up to four servos that the robot's code already moves from an input, such as a claw on a button. NEPI never drives a servo's pulses: the robot writes the input, the same way it writes the axis inputs.
 
-**Configuration.** Each servo is numbered keys in the Pi's configuration, `NEPI_SERVO_1_*` to `NEPI_SERVO_4_*`:
+**Configuration.** The vehicle file names each servo and its input ([VEHICLE_FILE.md](VEHICLE_FILE.md) "Servos"). A servo input cannot be an axis input, the toggle input or a reserved input, and two servos cannot share a name or an input.
 
-| Key | Meaning | Default |
-|---|---|---|
-| `NEPI_SERVO_n_NAME` | 1 to 16 lowercase letters, digits or `_`, starting with a letter. Empty or missing means the number is unused. | unused |
-| `NEPI_SERVO_n_INPUT` | The `gamepad_map` name of the input the sketch moves it with: `ABS_RX`, `ABS_HAT0X`, `ABS_HAT0Y`, `BTN_SOUTH`, `BTN_EAST`, `BTN_NORTH`, `BTN_WEST`, `BTN_THUMBL`, `BTN_THUMBR`, `BTN_START` or `BTN_SELECT`. The movement inputs NEPI already owns, LB (slow mode) and RB (the NEPI control button) are not allowed. | none |
-| `NEPI_SERVO_n_MIN`, `_NEUTRAL`, `_MAX` | The input's raw range, with MIN <= NEUTRAL <= MAX and MIN < MAX | RX -32767, 0, 32767; D-pad -1, 0, 1; buttons 0, 0, 1 |
-| `NEPI_SERVO_n_DEADZONE` | The pilot holds the input while it is more than this from NEUTRAL | RX 2999, since the Teensy zeroes \|RX\| < 3000 (`new_ctl.ino:570`); others 0 |
+**Mapping.** A value v from -1 to 1 becomes neutral + v × (max − neutral) for v ≥ 0, and neutral + v × (neutral − min) below 0, rounded half away from neutral and limited to min to max. So a three-way input (-1, 0, 1) is pressed for \|v\| ≥ 0.5 and a button (0, 0, 1) for v ≥ 0.5; a negative v leaves a button released.
 
-Two servos may not share a name or an input. Any bad value turns the link off, as for every other key.
-
-**Mapping.** A value v from -1 to 1 becomes NEUTRAL + v × (MAX − NEUTRAL) for v ≥ 0, and NEUTRAL + v × (NEUTRAL − MIN) below 0, rounded half away from NEUTRAL. So a D-pad is pressed for \|v\| ≥ 0.5 and a button for v ≥ 0.5; a negative v leaves a button released.
-
-**Pi rules.**
+**Robot rules.**
 - **Pilot mode:** the pilot's input passes through, and NEPI's values are ignored.
-- **NEPI control:** the input carries NEPI's value from the newest demand. It is NEUTRAL while the demand is older than 250 ms or has no value for that servo.
-- **The pilot wins per input:** while the pilot holds a servo's input off neutral, the pilot's value passes through for that input alone. Unlike a movement input, it never ends NEPI control.
+- **NEPI control:** the input carries NEPI's value from the newest demand. It is neutral while the demand is older than 250 ms or has no value for that servo.
+- **The pilot wins per input:** while the pilot holds a servo's input, \|value − neutral\| ≥ its dead zone, the pilot's value passes through for that input alone. Unlike an axis input, it never ends NEPI control.
 
 **NEPI rules.**
-- The driver accepts a servo value only while the newest status shows NEPI control. It drops every value when NEPI control ends, so a handover starts each servo at neutral.
+- The driver accepts a servo value only while the newest status shows NEPI control. It drops every value when NEPI control ends, so a hand-over starts each servo at neutral.
 - A value holds until it is changed; unlike a teleop command it never goes stale. RBX Stop leaves the servos alone.
 - Values go out rounded to 4 decimals, and only with `active` true.
 
-**What a value means is up to the sketch.**
+**What a value means is up to the robot's code.**
 - If the input sets the servo's angle (a stick), a value is a position.
-- If holding the input moves the servo (a held D-pad or button), a value is a direction to keep moving. On NEPI's servo page that is continuous mode.
-- A sketch that moves one step per press, rather than while held, cannot be driven this way, because the bridge holds the input rather than pressing it again.
-
-**The claw.** The claw servos are Axon MAX MK2s (`Docs/svx/axon_max_mk2_servo.md`). Which inputs move them, and how, is still open (BENCH_SETUP_PLAN V14). An Axon flashed with its continuous-rotation firmware reads its pulse as speed, so it would need continuous mode. In servo mode it can travel about 350°, so set the NEPI servo's `min_deg` and `max_deg` to the angles the sketch's two input ends reach.
+- If holding the input moves the servo (a held button), a value is a direction to keep moving. NEPI 3.4's servo page has no continuous mode, so such an input takes gotos only: a goto away from neutral holds the input in that direction until another goto, or the end of NEPI control, brings it back.
+- Code that moves one step per press, rather than while held, cannot be driven this way, because the robot holds the input rather than pressing it again.
 
 **On NEPI.**
-- Discovery reads the servo names from the status it probes, and launches one SVX node per servo (`Drivers/rbx_drivers/rbx_mate_rov_link_servo_node.py`), so each servo has its own page on NEPI.
-- Each servo node sends its value to the rbx node's `set_servo` topic as a `std_msgs/String` with JSON `{"name": ..., "value": ...}`, and reads the rbx node's `link_status`, which gains a `servos` object of `value` and `pilot` per servo.
+- Discovery reads the servo names from the vehicle message and launches one SVX node per servo (`Drivers/rbx_drivers/rbx_nepi_connect_servo_node.py`), so each servo has its own page on NEPI.
+- Each servo node sends its value to the RBX node's `set_servo` topic as a `std_msgs/String` with JSON `{"name": ..., "value": ...}`, and reads the RBX node's `link_status`, whose `servos` object holds `value` and `pilot` per servo.
 - In the servo node, 0° is the input's neutral, `max_deg` its high end and `min_deg` its low end.
-- Changing the Pi's servo list takes the driver disabled and enabled; the rbx node warns when the lists differ.
-
-**Size.** Four servos with 16-character names keep the worst-case status at 1154 bytes (`test_nepi_link.py`).
 
 ## Video to NEPI
 
-FastMJPG accepts one input and any number of outputs (`FastMJPG/src/FastMJPG.c:636-650`). Each camera's FastMJPG command gains a second `send` output, and the pilot's existing output stays as it is (`quick_stream.sh:1`). For camera 0:
+A camera reaches NEPI in one of two ways, and the vehicle message lists each one. NEPI does not set up its camera driver from the list: the driver's `link_status` shows each camera's address, which the user adds to NEPI's network stream camera driver (`idx_net_stream`) by hand.
+
+| Transport | Who sends it | Address in `link_status` |
+|---|---|---|
+| `http` | The robot's NEPI Connect service streams a USB camera with ustreamer, as MJPEG over HTTP | `http://<robot>:<port>/stream` |
+| `fastmjpg` | The robot's own FastMJPG command sends to NEPI's `port` | `fastmjpg://0.0.0.0:<port>` (any sender) |
+
+### FastMJPG packets
+
+FastMJPG accepts one input and any number of outputs (`FastMJPG/src/FastMJPG.c:636-650`). Each camera's FastMJPG command gains a second `send` output, and the pilot's existing output stays as it is. For camera 0:
 
 ```
-send 192.168.68.22 5610 <NEPI_LAN_IP> 5600 1400 1000000 1
+send <robot address> 5610 <nepi_ip> 5600 1400 1000000 1
 ```
 
 That is: from local port 5610, to NEPI port 5600, at most 1400 bytes per packet, at most 1000000 bytes per frame, and 1 send round.
@@ -249,7 +241,7 @@ Each UDP packet is a 20-byte header followed by one slice of a JPEG image (`Fast
 
 | Bytes | Field | Type |
 |---|---|---|
-| 0-7 | Capture time, µs since 1970-01-01 on the Pi's clock (`FastMJPG/src/VideoCapture.c:16-24, 177`) | unsigned 64-bit |
+| 0-7 | Capture time, µs since 1970-01-01 on the robot's clock (`FastMJPG/src/VideoCapture.c:16-24, 177`) | unsigned 64-bit |
 | 8-11 | Packet index, starting at 0 | unsigned 32-bit |
 | 12-15 | Number of packets in this frame | unsigned 32-bit |
 | 16-19 | Number of body bytes in this packet | unsigned 32-bit |
@@ -264,3 +256,16 @@ NEPI's receiver must:
 - Deliver a frame once it holds every index, and abandon an incomplete frame once a newer frame completes.
 - Drop any frame whose capture time is not newer than the last frame it delivered. This removes repeat rounds.
 - Keep only the newest complete frame.
+
+## Size
+
+The robot computes the worst-case vehicle and status message for its own vehicle file when it loads it, with every value at its longest, and turns the link off if either could exceed 1200 bytes. With `vehicles/mate_coral_crusaders.yaml`, the worst cases are 506 bytes for the vehicle message and 1035 bytes for the status, and four servos with 16-character names would raise them to 581 and 1134 (`pi/test_nepi_link.py`).
+
+## Changes from Version 1
+
+- The robot's configuration moved from flat `NEPI_*` keys to the vehicle file, which describes any robot rather than one.
+- New: the vehicle message, which NEPI's discovery waits for and builds the driver from.
+- Status: `assist` and `assist_reason` became `control` and `control_reason`; `pilot_surge`, `pilot_sway`, `pilot_yaw` and `pilot_depth` became the `pilot` object, keyed by axis (`pilot_depth` is `heave`); `out_lx` and the other `out_*` fields became the `out` object, keyed by input name; `tn`, `tn_age_ms`, `tn_count` and `tn_bad` became `nav` (standard names only), `nav_age_ms`, `nav_count` and `nav_bad`, plus `raw` for extra telemetry values. `slow` is gone.
+- Demand: `surge`, `sway`, `heave`, `yaw`, `pitch` and `roll` became the `axes` object, holding only announced axes.
+- `seq` is counted per message type.
+- The driver's `demand_port` option is gone; the port comes from the vehicle message.

@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>nepi_app_auto_move</name>
+  <name>nepi_app_ui</name>
   <version>0.0.0</version>
   <description>Click a point in an image to move the robot there</description>
 

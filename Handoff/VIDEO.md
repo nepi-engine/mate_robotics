@@ -6,7 +6,7 @@
 
 - **NEPI**: the edge-computing software on your NEPI computer. A NEPI **driver** connects one device to NEPI. **Discovery** is the driver step that finds a device and starts its node, one running program.
 - **IDX**: NEPI's driver type for cameras. A stream that an IDX driver reads becomes a **NEPI camera**: the RUI shows it, and NEPI apps (object detection, recording, processing) can use it as an image source.
-- **RBX**: NEPI's driver type for robots, here `rbx_mate_rov_link`. **NavPose**: NEPI's navigation and pose data.
+- **RBX**: NEPI's driver type for robots, here `rbx_nepi_connect` ("NEPI Connect" on NEPI's Drivers page). **NavPose**: NEPI's navigation and pose data.
 - **RUI**: NEPI's browser-based user interface.
 - **FastMJPG**: your video tool. It sends each frame as one JPEG cut into UDP packets in its own format, and each `send` output can repeat a frame several times (**send rounds**) to survive packet loss. A `send` output is written `send LOCAL_IP_ADDRESS LOCAL_PORT REMOTE_IP_ADDRESS REMOTE_PORT MAX_PACKET_LENGTH MAX_JPEG_LENGTH SEND_ROUNDS` (`rov-26 FastMJPG/README.md:142`; your `quick_stream.sh:1` is one).
 - **Relay**: a program that receives packets and sends them on unchanged.
@@ -73,6 +73,8 @@ How the driver reads a `fastmjpg://` URL (`NetStreamCamDriver.parseFastMJPGUrl` 
 - **Options.** If the send command's MAX_PACKET_LENGTH or MAX_JPEG_LENGTH differ from 1400 and 1000000, add `?max_packet=N&max_jpeg=N`, for example `fastmjpg://192.168.68.22:5600?max_jpeg=8000000` for your 8000000 setting.
 - **Probing.** Discovery waits until a URL delivers a frame before it starts that camera's node, and keeps re-probing a silent URL every 5 s (`PROBE_INTERVAL_SEC`). A camera started after NEPI therefore still appears.
 - **What else it reads.** The same driver also reads RTSP and HTTP streams. It reads no other plain UDP format.
+
+A vehicle file may also list cameras (`cameras`, [VEHICLE_FILE.md](../Nepi_Connect/VEHICLE_FILE.md) "cameras"). NEPI then only shows each camera's address on the robot driver's `link_status` topic, `fastmjpg://0.0.0.0:<port>` for a FastMJPG camera. It does not set up `idx_net_stream` from that list, so you still enter the URLs above by hand. Your [mate_coral_crusaders.yaml](../Nepi_Connect/vehicles/mate_coral_crusaders.yaml) lists no cameras, and nothing in this file depends on it.
 
 ### Quick look without NEPI
 

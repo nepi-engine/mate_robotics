@@ -4,7 +4,7 @@ This page explains how to put this firmware onto a Teensy 4.1 for the NEPI `svx_
 
 The commands come from the flashes done on device1 on 2026-10-26 (firmware 1.1.0) and 2026-10-27 (firmware 1.2.0), both onto Teensy 21616540.
 
-A Teensy holds one firmware at a time. This firmware and the team's `new_ctl` (used through `rbx_mate_rov_link`) replace each other, so switching drivers means reflashing. See the last section.
+A Teensy holds one firmware at a time. This firmware and the team's `new_ctl` (used through `rbx_nepi_connect`) replace each other, so switching drivers means reflashing. See the last section.
 
 ## Where things are
 
@@ -101,7 +101,7 @@ mkdir -p ~/bench_fw/teensy_thrusters
 
 ## Going back to the team firmware
 
-This is for the `rbx_mate_rov_link` setup: NEPI → UDP → the team's control Pi → Teensy. NEPI never talks to the Teensy there, so the Teensy needs the team's `new_ctl` and plugs into the control Pi.
+This is for the `rbx_nepi_connect` setup: NEPI → UDP → the team's control Pi → Teensy. NEPI never talks to the Teensy there, so the Teensy needs the team's `new_ctl` and plugs into the control Pi.
 
 - **From the control Pi** (`nepidev`, which has its own tools and libraries), using the port from the `arduino-cli board list` row whose protocol is `teensy`:
   ```

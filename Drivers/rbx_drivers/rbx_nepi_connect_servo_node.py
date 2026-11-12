@@ -16,38 +16,39 @@
 # - mailto:nepi@numurus.com
 #
 
-# SVX (servo) node for one servo on the Coral Crusaders MATE ROV, such as a
-# claw servo, reached through the MATE ROV link RBX node
-# (rbx_mate_rov_link_node.py). rbx_mate_rov_link_discovery.py launches one per
-# servo the ROV Pi lists in its status (LINK_PROTOCOL "Servos").
+# SVX (servo) node for one servo on a NEPI Connect robot, such as a claw
+# servo, reached through the NEPI Connect RBX node (rbx_nepi_connect_node.py).
+# rbx_nepi_connect_discovery.py launches one per servo the robot's vehicle
+# message lists (LINK_PROTOCOL "Servos").
 #
-# NEPI never drives this servo's pulses. The team's sketch moves it from a
-# controller input, and the Pi's nepi_link.yaml names that input; this node
+# NEPI never drives this servo's pulses. The robot's own code moves it from a
+# controller input, and the robot's vehicle file names that input; this node
 # only sets a value from -1 to 1 for it, which the rbx node sends with every
-# demand and nepi_link writes into the input. So what a position means is the
-# team sketch's business: if the input sets the servo's angle (a stick), a
+# demand and nepi_connect writes into the input. So what a position means is
+# the robot code's business: if the input sets the servo's angle (a stick), a
 # goto is a real position; if holding the input moves the servo (a D-pad or a
-# button), turn on continuous mode on the servo page, where the SVX IF turns
-# direction and speed into an offset from home, so holding is spinning.
+# button), the 3.4 DeviceSVXIF has no continuous mode to turn direction and
+# speed into an offset from home, so only gotos reach it.
 #
-# NEPI CONTROL ONLY: a value goes out only while NEPI has the ROV, which only
-# the pilot's RB gives it. In pilot mode a goto is refused with a warning, and
-# the rbx node drops every servo value when NEPI control ends, so after a
-# handover the servo starts at neutral. The pilot can still override: on the
-# Pi, the pilot's own input wins over NEPI's whenever it is off neutral.
+# NEPI CONTROL ONLY: a value goes out only while NEPI has the robot, which
+# only the pilot's toggle input gives it. In pilot mode a goto is refused with
+# a warning, and the rbx node drops every servo value when NEPI control ends,
+# so after a handover the servo starts at neutral. The pilot can still
+# override: on the robot, the pilot's own input wins over NEPI's whenever the
+# pilot holds it.
 #
-# One SVX device = one servo = one node: SVXActuatorIF always lives at
-# <node>/svx, as on the Maestro and the Teensy servo nodes.
+# One SVX device = one servo = one node: DeviceSVXIF always lives at
+# <node>/<device_name>/svx, as on the Maestro and the Teensy servo nodes.
 #
 # Degrees: 0 deg is the input's neutral, max_deg its high end (value 1) and
 # min_deg its low end (value -1), each half scaled on its own, the same split
-# nepi_link's servo_value uses. min_deg and max_deg are node settings, so set
-# them to the angles the team's servo really reaches. Home defaults to 0 deg,
+# nepi_connect's servo_value uses. min_deg and max_deg are node settings, so
+# set them to the angles the robot's servo really reaches. Home defaults to 0 deg,
 # the neutral, which is also where continuous mode stops.
 #
 # NO FEEDBACK: getPosition is the value NEPI is sending, as the rbx node's
 # link_status reports it, not a measurement: 0 deg while NEPI does not have
-# the ROV, whatever the pilot does with the servo.
+# the robot, whatever the pilot does with the servo.
 
 import copy
 import json
@@ -59,10 +60,10 @@ from nepi_sdk import nepi_controls
 
 from std_msgs.msg import String
 
-from nepi_api.device_if_svx import SVXActuatorIF
+from nepi_api.device_if_svx import DeviceSVXIF
 from nepi_api.messages_if import MsgIF
 
-PKG_NAME = 'RBX_MATE_ROV_LINK' # Use in display menus
+PKG_NAME = 'RBX_NEPI_CONNECT' # Use in display menus
 FILE_TYPE = 'NODE'
 
 
@@ -108,7 +109,7 @@ def value_to_deg(value, min_deg, max_deg):
 # Node Class
 #########################################
 
-class MateRovLinkServoNode:
+class NepiConnectServoNode:
 
   DEFAULT_MIN_DEG = -90.0
   DEFAULT_MAX_DEG = 90.0
@@ -119,7 +120,7 @@ class MateRovLinkServoNode:
   DEFAULT_SPEED_RATIO = 0.5
 
   # The rbx node publishes link_status every 100 ms; an older one, or none,
-  # counts as NEPI not having the ROV.
+  # counts as NEPI not having the robot.
   LINK_STATUS_TIMEOUT_SEC = 1.0
   REFUSED_WARN_SEC = 5.0
 
@@ -175,7 +176,7 @@ class MateRovLinkServoNode:
 
     # Per-instance copies, so the settings write to this servo's own limits
     # and never to the class-level dict
-    self.FACTORY_LIMITS_DICT = copy.deepcopy(MateRovLinkServoNode.FACTORY_LIMITS_DICT)
+    self.FACTORY_LIMITS_DICT = copy.deepcopy(NepiConnectServoNode.FACTORY_LIMITS_DICT)
     self.limits_dict = copy.deepcopy(self.FACTORY_LIMITS_DICT)
     self.speed_ratio = self.DEFAULT_SPEED_RATIO
     self.home_pos_deg = 0.0
@@ -201,9 +202,10 @@ class MateRovLinkServoNode:
     self.settings_dict = self.refreshSettingsDict()
 
     ##############################
-    # Launch the NEPI SVX interface. servo_connected defaults True: the Pi
-    # listed this servo, so it is there, and the servo page lists only
-    # connected servos.
+    # Launch the NEPI SVX interface. servo_connected True says the robot listed
+    # this servo, so it is there, and the servo page lists only connected
+    # servos. The 3.4 DeviceSVXIF does not read factoryControls: its
+    # servo_connected param starts False until the servo is marked connected.
     self.msg_if.pub_info("Launching NEPI SVX interface for servo " + self.servo_name + "...")
     self.device_info_dict = dict(device_name = self.device_name,
                                  path = self.device_path,
@@ -215,11 +217,19 @@ class MateRovLinkServoNode:
       'speed_ratio' : self.DEFAULT_SPEED_RATIO,
       'servo_connected' : True
     }
-    self.svx_if = SVXActuatorIF(device_info = self.device_info_dict,
+    # Positional servo: rotate type (DeviceSVXIF defaults to spin).
+    # DeviceSVXIF has no device reset callback, so resetDevice is not passed.
+    self.svx_if = DeviceSVXIF(device_info = self.device_info_dict,
+                                is_rotate = True,
                                 getSettingsFunction = self.getSettingsFunction,
                                 setSettingFunction = self.setSettingFunction,
                                 factoryControls = self.FACTORY_CONTROLS,
-                                factoryLimits = self.FACTORY_LIMITS_DICT,
+                                # DeviceSVXIF is unitless: its limit keys carry no _deg
+                                factoryLimits = {
+                                    'min_hardstop': self.FACTORY_LIMITS_DICT['min_hardstop_deg'],
+                                    'max_hardstop': self.FACTORY_LIMITS_DICT['max_hardstop_deg'],
+                                    'min_softstop': self.FACTORY_LIMITS_DICT['min_softstop_deg'],
+                                    'max_softstop': self.FACTORY_LIMITS_DICT['max_softstop_deg']},
                                 stopMovingCb = self.stopMoving,
                                 gotoPositionCb = self.gotoPosition,
                                 getPositionCb = self.getPosition,
@@ -230,14 +240,13 @@ class MateRovLinkServoNode:
                                 goHomeCb = self.goHome,
                                 setHomePositionCb = self.setHomePosition,
                                 setHomePositionHereCb = self.setHomePositionHere,
-                                deviceResetCb = self.resetDevice,
                                 msg_if = self.msg_if
                                )
     self.msg_if.pub_info("... SVX interface running")
 
     # Persisted min_deg/max_deg may have been applied while svx_if was still
     # None, so push the range now that the IF exists
-    self.svx_if.setHardstopLimits(self.limits_dict['min_hardstop_deg'], self.limits_dict['max_hardstop_deg'])
+    self.svx_if.set_hardstop_limits(self.limits_dict['min_hardstop_deg'], self.limits_dict['max_hardstop_deg'])
 
     ## Initiation Complete
     self.msg_if.pub_info("Initialization Complete")
@@ -325,7 +334,7 @@ class MateRovLinkServoNode:
       return False, "max_deg must be from " + str(self.MAX_DEG_BOUNDS[0]) + " to " + str(self.MAX_DEG_BOUNDS[1])
     # Guarded because SettingsIF can apply a persisted value before the IF exists
     if self.svx_if is not None:
-      if self.svx_if.setHardstopLimits(min_deg, max_deg) == False:
+      if self.svx_if.set_hardstop_limits(min_deg, max_deg) == False:
         return False, "SVX interface rejected degree range " + str(min_deg) + " to " + str(max_deg)
     for limits in [self.FACTORY_LIMITS_DICT, self.limits_dict]:
       limits['min_hardstop_deg'] = min_deg
@@ -353,7 +362,7 @@ class MateRovLinkServoNode:
     except Exception as e:
       self.msg_if.pub_warn("Bad link_status: " + str(e), throttle_s = 5.0)
 
-  def nepiHasRov(self):
+  def nepiHasRobot(self):
     with self.link_lock:
       if self.link_status_time is None:
         return False
@@ -364,12 +373,12 @@ class MateRovLinkServoNode:
   def sendValue(self, value):
     # Pilot mode refuses the move here, before it reaches the rbx node, which
     # would refuse it too
-    if not self.nepiHasRov():
+    if not self.nepiHasRobot():
       now = nepi_utils.get_time()
       if self.last_refused_warn is None or now - self.last_refused_warn > self.REFUSED_WARN_SEC:
         self.last_refused_warn = now
-        self.msg_if.pub_warn("Servo " + self.servo_name + " not moved: NEPI does not have the ROV. "
-                             "The pilot hands it over with RB.")
+        self.msg_if.pub_warn("Servo " + self.servo_name + " not moved: NEPI does not have the robot. "
+                             "The pilot hands it over with the toggle input.")
       return False
     self.set_servo_pub.publish(String(data = json.dumps(dict(name = self.servo_name, value = value))))
     return True
@@ -379,8 +388,7 @@ class MateRovLinkServoNode:
   ### SVX IF Callbacks
   #
   # The SVX IF clamps a commanded position to the range and applies the
-  # reverse setting before calling gotoPosition, and in continuous mode turns
-  # direction and speed into a position too, so every move arrives here.
+  # reverse setting before calling gotoPosition, so every move arrives here.
 
   def gotoPosition(self, position_deg):
     value = deg_to_value(float(position_deg), self.limits_dict['min_hardstop_deg'],
@@ -406,7 +414,7 @@ class MateRovLinkServoNode:
 
   def setSpeedRatio(self, ratio):
     # Only continuous mode uses it, through the SVX IF; in positional mode the
-    # team's sketch decides how fast the servo moves
+    # robot's own code decides how fast the servo moves
     self.speed_ratio = max(0.0, min(1.0, float(ratio)))
 
   def getSpeedRatio(self):
@@ -433,4 +441,4 @@ class MateRovLinkServoNode:
 # Main
 #########################################
 if __name__ == '__main__':
-  MateRovLinkServoNode()
+  NepiConnectServoNode()

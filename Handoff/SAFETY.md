@@ -25,18 +25,18 @@ The numbers live in [SYSTEM_GUIDE.md](SYSTEM_GUIDE.md#control-modes-and-handover
 
 | # | Rule | Where it is enforced |
 |---|---|---|
-| 1 | **Caps.** Every demand is limited to its `NEPI_MAX_*` key on the ROV Pi, after NEPI and before your sketch. Nothing on NEPI can exceed it. 0 turns an axis off. | `clampDemand` in `NepiLink.mergeLocked`; range checked in `validate_config` ([nepi_link.py](../Nepi_Connect/pi/nepi_link.py)) |
-| 2 | **Takeover.** Any of LY, LX, RY, LT or RT at or past the takeover point ends NEPI control on that pass, and the pilot's input goes through at once. | `takeoverInputLocked` and `updatePilotLocked`; `NEPI_TAKEOVER_FRACTION` |
-| 3 | **RB hands over only when it is safe to.** RB starts NEPI control only while NEPI is ready and no movement input is past the takeover point. NEPI can never start it: `active` true only marks NEPI ready. | `toggleAssistLocked`, `nepiReadyLocked`, `handleDemandLocked` |
+| 1 | **Caps.** Every demand is limited to its axis's `cap` in your vehicle file on the ROV Pi, after NEPI and before your sketch. Nothing on NEPI can exceed it. 0 turns an axis off. | `clamp_demand` in `apply_axis` ([mapping.py](../Nepi_Connect/pi/nepi_connect/mapping.py)), called from `NepiControl.mergeLocked` ([control.py](../Nepi_Connect/pi/nepi_connect/control.py)); range checked in `validate_vehicle` ([vehicle.py](../Nepi_Connect/pi/nepi_connect/vehicle.py)) |
+| 2 | **Takeover.** Any of LY, LX, RY, LT or RT at or past the takeover point ends NEPI control on that pass, and the pilot's input goes through at once. | `takeoverInputLocked` and `updatePilotLocked`; `control.takeover_fraction` |
+| 3 | **RB hands over only when it is safe to.** RB starts NEPI control only while NEPI is ready and no movement input is past the takeover point. NEPI can never start it: `active` true only marks NEPI ready. | `toggleControlLocked`, `nepiReadyLocked`, `handleDemandLocked` |
 | 4 | **Stale demands go neutral.** A demand older than 0.25 s leaves every NEPI-owned input at 0. | `demandFreshLocked`, `DEMAND_STALE_SEC` |
-| 5 | **Silence ends NEPI control.** 2 s without an accepted demand hands the ROV back. | `checkTimeoutLocked`, `ASSIST_TIMEOUT_SEC` |
-| 6 | **NEPI stops sending when it stops hearing.** The driver sends no demand once 0.5 s pass without a valid status, so rules 4 and 5 then act on the ROV Pi. | `MateRovLink.linkUpLocked`, `nextDemandLocked`, `LINK_TIMEOUT_SEC` ([rbx_mate_rov_link_node.py](../Drivers/rbx_drivers/rbx_mate_rov_link_node.py)) |
+| 5 | **Silence ends NEPI control.** 2 s without an accepted demand hands the ROV back. | `checkTimeoutLocked`, `CONTROL_TIMEOUT_SEC` |
+| 6 | **NEPI stops sending when it stops hearing.** The driver sends no demand once 0.5 s pass without a valid status, so rules 4 and 5 then act on the ROV Pi. | `NepiConnectLink.linkUpLocked`, `nextDemandLocked`, `LINK_TIMEOUT_SEC` ([rbx_nepi_connect_node.py](../Drivers/rbx_drivers/rbx_nepi_connect_node.py)) |
 | 7 | **Neutral on no command.** With no teleop command newer than 0.5 s, or after Stop, the demand is 0 on every axis, and the Teensy's own holds act. A handover always starts from neutral. | `nextDemandLocked`, `TELEOP_CMD_TIMEOUT_SEC`, `go_stop` |
-| 8 | **Teleop only during NEPI control,** and only while `teleop_movement_enabled` is `TRUE` | `MateRovLinkNode.teleopControlsReady`, `MateRovLink.is_nepi_control` |
+| 8 | **Teleop only during NEPI control,** and only while `teleop_movement_enabled` is `TRUE` | `NepiConnectNode.teleopControlsReady`, `NepiConnectLink.is_nepi_control` |
 | 9 | **NEPI can hand back but never take.** Set State PILOT and a driver shutdown each send one `active` false demand, which ends NEPI control at once. | `setStateInd`, `release_to_pilot`, `cleanup_actions` |
-| 10 | **Servos only in NEPI control, the pilot wins per input, and neutral after a handback.** Not used in the team config. | `mergeLocked` servo branch; `MateRovLink.set_servo`; `nextDemandLocked` drops the values |
+| 10 | **Servos only in NEPI control, the pilot wins per input, and neutral after a handback.** Not used in the team's vehicle file. | `mergeLocked` servo branch; `NepiConnectLink.set_servo`; `nextDemandLocked` drops the values |
 | 11 | **Only NEPI's address is obeyed.** Demands from any other address, malformed demands and out-of-order demands are dropped and counted (`demand_bad`). | `parse_demand`, `handleDemandLocked` |
-| 12 | **nepi_link never stops your script.** Every public function catches every error and passes the pilot's inputs through. An empty `NEPI_LAN_IP` or an invalid config value turns the link off entirely. | `merge_inputs` and the other module functions; `validate_config` |
+| 12 | **nepi_link never stops your script.** Every public function catches every error and passes the pilot's inputs through. A missing vehicle file, missing PyYAML, an empty `network.nepi_ip` or an invalid value in the vehicle file turns the link off entirely. | `merge_inputs` and the other module functions; `validate_vehicle` |
 | 13 | **The pilot always sees the state.** The topside tag reads `NEPI:ON`, `WAIT`, `OFF` or `NOTREADY`. | `topside_tag` |
 
 ## What Our Code Cannot Do
@@ -55,10 +55,10 @@ The numbers live in [SYSTEM_GUIDE.md](SYSTEM_GUIDE.md#control-modes-and-handover
 | ESC deadband | The ESCs; your sketch's pulse mapping (`THRUSTER_POWER`, `new_ctl.ino:33`) | Decides the smallest demand that does anything (below) |
 | Kill switch and supply | Your ROV's power system | On our bench, the supply switch was the only stop that worked in every case. Ctrl+C on the scripts does not stop a thruster. |
 | Firmware watchdogs | Your sketch | rov-26 has none for link loss or an IMU reset (findings 3 and 4) |
-| Thruster pin map, reversals, signs | Your sketch and wiring | We never saw your pin map; the `NEPI_*_SIGN` keys follow from it ([TEST_PLAN.md](TEST_PLAN.md#measuring-the-signs-and-the-imu-mount)) |
+| Thruster pin map, reversals, signs | Your sketch and wiring | We never saw your pin map; each axis's `sign` in your vehicle file follows from it ([TEST_PLAN.md](TEST_PLAN.md#measuring-the-signs-and-the-imu-mount)) |
 | Depth hold and heading hold | Your sketch | NEPI relies on them whenever its demand is 0 |
 | IMU orientation in the firmware | Your sketch | The driver's `imu_mount` fixes only what NEPI sees (finding 6) |
-| The caps themselves | `NEPI_MAX_*` in your `nepi_link.yaml` | Ours are starting values only |
+| The caps themselves | Each axis's `cap` in your `nepi_connect_vehicle.yaml` | Ours are starting values only |
 
 ## Choosing the Caps
 
@@ -74,7 +74,7 @@ A cap of 0.2 lets NEPI move a stick to at most 8713 of 32767, which is 27% of fu
 
 - A cap below an axis's smallest useful demand (next section) makes that axis do nothing.
 - Raise caps one step at a time, and only after the axis has passed its tests at the lower cap.
-- Until you have checked finding 1, set `NEPI_MAX_YAW: 0`.
+- Until you have checked finding 1, set the yaw cap to 0 (`control.axes.yaw.cap`).
 
 ## The ESC Deadband and the Smallest Useful Demand
 
@@ -87,7 +87,7 @@ For an open-loop axis, the smallest demand that turns a thruster at all follows 
    - 400 is `ESC_MAGNITUDE` (`:26`);
    - the cast truncates toward 0.
 3. So the stick must reach 26 x 32767 / (400 x gain x mult), rounded up.
-4. nepi_link's `stick_value` gives that stick for a demand of 0.01 + 0.99 x (stick - 3000.5) / 29767 or more.
+4. nepi_link's `stick_value` (`nepi_connect/mapping.py`) gives that stick for a demand of 0.01 + 0.99 x (stick - 3000.5) / 29767 or more.
 
 | Axis | Mode | Stick needed | Smallest useful demand | Default cap |
 |---|---|---|---|---|
@@ -111,7 +111,7 @@ Each finding is in rov-26 at `1af4984`. For each one, check whether your current
    - **Effect.** RT alone works as intended. LT alone asks for LT x 180 deg/s. On our bench, LT 129 gave a yaw target of 23220.
    - **With NEPI.** This affects the pilot's own LT, and every positive NEPI yaw, which nepi_link sends on LT. The yaw then runs at whatever the current limiter allows.
    - **Check.** Pull LT a little and read `$TNCTL` column 19 (`yaw_rate_target_deg_s`). Thousands means the bug is there.
-   - **Fix.** `#define NORMALIZE_TRIGGER(x) ((double)(x) / (double)(TRIGER_MAGNITUDE))`. Until it is fixed, set `NEPI_MAX_YAW: 0`.
+   - **Fix.** `#define NORMALIZE_TRIGGER(x) ((double)(x) / (double)(TRIGER_MAGNITUDE))`. Until it is fixed, set the yaw cap to 0 (`control.axes.yaw.cap`).
 2. **Thrust is not monotonic in stick travel, and combined inputs can reach about 17 A.**
    - **Where.** `limit_current()` scales pulses linearly against the summed current estimate of a whole group (`new_ctl.ino:513-550`), using a table that is far from linear (`AMP_LIST`, `:21`).
    - **RY alone,** computed in air: 60% stick gives about 1730 µs (4.8 A each), but full stick only about 1618 µs (0.8 A each).
@@ -120,7 +120,7 @@ Each finding is in rov-26 at `1af4984`. For each one, check whether your current
 3. **A BNO085 reset hangs the loop.**
    - **Where.** `read_imu()` loops until it has both a gyro and a game-rotation event (`new_ctl.ino:381-396`). Neither sketch calls `wasReset()` or re-enables the reports.
    - **Effect.** If the IMU resets, `loop()` never returns. No new frame is read, `$TNCTL` stops, and the thrusters hold their last pulse.
-   - **With NEPI.** Its `tn_age_ms` keeps growing and its NavPose goes stale.
+   - **With NEPI.** Its `nav_age_ms` keeps growing and its NavPose goes stale.
    - **Fix.** A bounded wait, plus `wasReset()` and re-enabling the reports.
 4. **Nothing stops a thruster when the link drops.**
    - **Where.** Your Pi script resends its last frame every 0.1 s whatever happens upstream (`rpi/modes/main.py:84-88`). The Teensy keeps its last inputs until a new frame arrives (`new_ctl.ino:325-362`).
@@ -140,21 +140,21 @@ Each finding is in rov-26 at `1af4984`. For each one, check whether your current
    - **With NEPI.** The driver's `imu_mount` corrects what NEPI sees ([NEPI_SETUP.md](NEPI_SETUP.md#choosing-imu_mount)), but not what your Teensy uses.
    - **Fix,** in your firmware. Rotate the quaternion by the mount before the conversion. Or store the mount in the BNO085 (`sh2_setReorientation()`, FRS record 0x2D3E), which rotates the gyro axes too, so the yaw rate moves to `gyroscope.z`.
    - **Also check** that the hold corrects rather than runs away. With target 0, `yaw_rate_controller.compute(shortest_angle(yaw, yaw_target))` asks for a rate of yaw minus target (`:298-304, 491`), and which way that turns depends on the mount.
-7. **The Teensy will not start without both sensors.** Both sketches loop in `setup()` until a Bar02 and a BNO085 answer (`new_ctl.ino:227-256`, `tuning.ino:244-273`). The thruster pins are attached only after that (`new_ctl.ino:268-275`). The "Failed to initialize" lines printed meanwhile count as `tn_bad`.
+7. **The Teensy will not start without both sensors.** Both sketches loop in `setup()` until a Bar02 and a BNO085 answer (`new_ctl.ino:227-256`, `tuning.ino:244-273`). The thruster pins are attached only after that (`new_ctl.ino:268-275`). The "Failed to initialize" lines printed meanwhile count as `nav_bad`.
 8. **The repo's depth-sensor library does not compile, and the replacement is slow.**
    - **Where.** `rov-26/MS5837/MS5837.h` is the newer Blue Robotics version (it declares `init(TwoWire &wirePort = Wire)`, `begin()` and `MS5837_UNRECOGNISED`), while `MS5837.cpp` is the older one.
    - **The replacement.** The Arduino library manager's "BlueRobotics MS5837 Library" compiles. With it, our bench saw one `$TNCTL` line every 2.27 s.
    - **What NEPI needs.** By our estimate, NEPI stabilization needs at least 20 new readings a second, with a 95th-percentile age of 100 ms or less ([DRIVER_HANDOFF.md](../Nepi_Connect/DRIVER_HANDOFF.md) "Targets"). Rows 1, 2 and 6 of its "Problems to fix" are firmware suggestions for you.
-9. **A telemetry line must hold exactly 20 values.** nepi_link drops any `$TNCTL` line that is not 20 values plus a `*XX` field (`parse_teensy_line`).
+9. **A telemetry line must hold exactly 20 values.** nepi_link drops any `$TNCTL` line that is not the 20 values in your vehicle file's `telemetry.fields` plus a `*XX` field (`parse_line` in `nepi_connect/telemetry.py`).
    - rov-26's `tuning.ino` already prints 25 (it adds four controller values and `millis()`, `tuning.ino:601-656`), so its lines would all be dropped.
-   - If your current sketch prints more, for example PHT values, `TN_NAMES` in `nepi_link.py` and `TN_VALUES` in the driver node must change together. Send us the column order and we will make that change.
-10. **The topside script accepts one connection only.** `topside/modes/main.py:20` calls `accept()` once, so after restarting the Pi script (for example after editing `nepi_link.yaml`), restart the topside script first.
+   - If your current sketch prints more, for example PHT values, list the new columns in `telemetry.fields` in your vehicle file, in order ([VEHICLE_FILE.md](../Nepi_Connect/VEHICLE_FILE.md) "telemetry"). The driver reads the names from the ROV's vehicle message, so nothing on NEPI has to change.
+10. **The topside script accepts one connection only.** `topside/modes/main.py:20` calls `accept()` once, so after restarting the Pi script (for example after editing `nepi_connect_vehicle.yaml`), restart the topside script first.
 
 ## Rules for the First Powered Tests
 
 1. One person holds the supply switch, and nobody touches a propeller while the supply is on.
 2. Run every stage of [TEST_PLAN.md](TEST_PLAN.md) in order. Do not supply the ESCs until stages 1 and 2 pass.
-3. Start with `NEPI_MAX_YAW: 0` and the other caps at 0.1 or lower. Raise one cap at a time.
+3. Start with the yaw cap at 0 and the other caps at 0.1 or lower. Raise one cap at a time.
 4. Test one axis at a time, at the smallest useful demand first.
 5. A T200 must not run more than 10 s out of water ([Docs/Motors/bluerobotics_t200_thruster.md](../Docs/Motors/bluerobotics_t200_thruster.md)).
 6. Before each powered run, check that RB, a stick past the takeover point, and stopping NEPI each hand the ROV back.

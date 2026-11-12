@@ -1,0 +1,102 @@
+# NEPI Connect vehicle file for the MATE ROV bench (BENCH_SETUP_PLAN.md P9).
+#
+# Converted on 2026-11-11 from Nepi_Connect/pi/nepi_link_bench.yaml, with the
+# same values. On the bench control Pi this file is named
+# nepi_connect_vehicle.yaml and sits beside nepi_link.py and main.py. Every key
+# is explained in Nepi_Connect/VEHICLE_FILE.md, and the firmware facts behind
+# the MATE values are in vehicles/mate_coral_crusaders.yaml. An empty nepi_ip
+# turns the link off.
+
+vehicle:
+  name: mate_bench
+  kind: ROV
+
+network:
+  nepi_ip: 192.168.68.23    # the NEPI Pi (A3); a fake NEPI run from the laptop needs 192.168.68.12 instead
+  status_port: 5700
+  demand_port: 5701
+
+control:
+  adapter: hooks
+  toggle_input: BTN_TR       # RB: hands the ROV to NEPI and back (D3, decided 2026-10-22)
+  takeover_fraction: 0.25    # any movement input past this share of its travel ends NEPI control
+  reserved_inputs: [BTN_TL]  # LB, the Teensy's slow mode
+  # Triggers: TRIGGER_DEADZONE_CONST and TRIGER_MAGNITUDE in the P6 bench copy
+  # of new_ctl.ino are 40 and 1023
+  inputs:
+    ABS_X:      {slot: 0,  min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: LX}
+    ABS_Y:      {slot: 1,  min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: LY}
+    ABS_RX:     {slot: 2,  min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: RX}
+    ABS_RY:     {slot: 3,  min: -32767, neutral: 0, max: 32767, deadzone: 3000, label: RY}
+    BTN_THUMBL: {slot: 4,  min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_THUMBR: {slot: 5,  min: 0, neutral: 0, max: 1, deadzone: 1}
+    ABS_HAT0X:  {slot: 6,  min: -1, neutral: 0, max: 1, deadzone: 1}
+    ABS_HAT0Y:  {slot: 7,  min: -1, neutral: 0, max: 1, deadzone: 1}
+    BTN_SOUTH:  {slot: 8,  min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_EAST:   {slot: 9,  min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_NORTH:  {slot: 10, min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_WEST:   {slot: 11, min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_TL:     {slot: 12, min: 0, neutral: 0, max: 1, deadzone: 1, label: LB}
+    BTN_TR:     {slot: 13, min: 0, neutral: 0, max: 1, deadzone: 1, label: RB}
+    ABS_Z:      {slot: 14, min: 0, neutral: 0, max: 1023, deadzone: 40, label: LT}
+    ABS_RZ:     {slot: 15, min: 0, neutral: 0, max: 1023, deadzone: 40, label: RT}
+    BTN_START:  {slot: 16, min: 0, neutral: 0, max: 1, deadzone: 1}
+    BTN_SELECT: {slot: 17, min: 0, neutral: 0, max: 1, deadzone: 1}
+  axes:
+    surge: {kind: stick, input: ABS_Y, sign: -1, cap: 0.2}   # measured 2026-10-22: LY pushed up (forward) reads negative
+    sway:  {kind: stick, input: ABS_X, sign: 1, cap: 0.2}    # +1 or -1, still to be measured on the bench
+    heave: {kind: stick, input: ABS_RY, sign: 1, cap: 0.2}   # heave is positive down: 1 if RY pushed up (rise) reads negative, as LY does; still to be measured
+    yaw:   {kind: trigger_pair, inputs: [ABS_Z, ABS_RZ], sign: 1, cap: 0.1}   # +1 or -1, still to be measured on the bench
+  # Servos NEPI may move in NEPI control (VEHICLE_FILE.md "Servos"). Which
+  # inputs move the claw is still open (V14), so this stays commented out
+  # until the team answers. Example: the claw's pitch on the D-pad's up/down.
+  #   servos:
+  #     claw_pitch: {input: ABS_HAT0Y}
+  servos: {}
+
+telemetry:
+  format: csv_line
+  prefix: '$TNCTL'
+  trailer: '^\*[0-9A-Fa-f]{2}$'
+  fields:
+    - {name: vfl_pwr, type: int}
+    - {name: vfr_pwr, type: int}
+    - {name: vbl_pwr, type: int}
+    - {name: vbr_pwr, type: int}
+    - {name: hfl_pwr, type: int}
+    - {name: hfr_pwr, type: int}
+    - {name: hbl_pwr, type: int}
+    - {name: hbr_pwr, type: int}
+    - {name: depth_m, type: float}
+    - {name: depth_m_s, type: float}
+    - {name: yaw_deg, type: float}
+    - {name: pitch_deg, type: float}
+    - {name: roll_deg, type: float}
+    - {name: yaw_deg_s, type: float}
+    - {name: pitch_deg_s, type: float}
+    - {name: roll_deg_s, type: float}
+    - {name: depth_rate_target_m_s, type: float}
+    - {name: depth_pwr_out, type: float}
+    - {name: yaw_rate_target_deg_s, type: float}
+    - {name: yaw_pwr_out, type: float}
+  nav:
+    depth:
+      depth_m: depth_m
+      depth_m_s: depth_m_s
+    # The bench Teensy has a Bar02 but no IMU yet, so these read 0
+    orientation:
+      roll_deg: roll_deg
+      pitch_deg: pitch_deg
+      yaw_deg: yaw_deg
+      gyro_x_deg_s: yaw_deg_s
+      gyro_y_deg_s: pitch_deg_s
+      gyro_z_deg_s: roll_deg_s
+  raw: [vfl_pwr, vfr_pwr, vbl_pwr, vbr_pwr, hfl_pwr, hfr_pwr, hbl_pwr, hbr_pwr,
+        depth_rate_target_m_s, depth_pwr_out, yaw_rate_target_deg_s, yaw_pwr_out]
+  imu_mount: X_FORWARD_Y_LEFT
+
+# The bench Pi's USB camera, streamed by the NEPI Connect service
+# (resources/config/nepi_connect.sh) with the settings the service used before
+# the vehicle file existed. NEPI reads it at http://<this Pi>:8080/stream.
+cameras:
+  - {name: main, transport: http, port: 8080, device: '', resolution: 1280x720, fps: 30}

@@ -7,7 +7,7 @@ This file is part of nepi-engine
 License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
 ]]
 cmake_minimum_required(VERSION 3.5)
-project(nepi_app_auto_move)
+project(nepi_app_ui)
 
 # sensor_msgs, geometry_msgs, and nav_msgs are not used by this package's own
 # messages. They are nepi_interfaces' MSG_DEP_SET, and genmsg resolves a message
@@ -26,7 +26,7 @@ nepi_interfaces
 
 ## Generate messages in the 'msg' folder
 add_message_files(FILES
-  NepiAppAutoMoveStatus.msg
+  NepiAppUiStatus.msg
 )
 
 ## Generate services in the 'srv' folder
@@ -65,8 +65,8 @@ include_directories(
 
 ## Mark executable scripts (Python etc.) for installation
 catkin_install_python(PROGRAMS
-  scripts/auto_move_app_node.py
-  scripts/auto_move_app_img_pub_node.py
+  scripts/ui_app_node.py
+  scripts/ui_app_img_pub_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

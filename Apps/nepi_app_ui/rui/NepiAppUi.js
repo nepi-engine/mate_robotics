@@ -46,14 +46,14 @@ function round(value, decimals = 0) {
 @inject("ros")
 @observer
 
-// Auto Move app main panel. Left column is the overlay image viewer, right
+// UI app main panel. Left column is the overlay image viewer, right
 // column is the app panel: the robot and image selectors, a readout of which
 // companion topics were resolved, the overlay and goto controls, and the app's
 // ControlsIF box.
 //
 // This page binds to ONE app node, not to a manager list. The status topic is
-// <app>/status carrying nepi_app_auto_move/NepiAppAutoMoveStatus, and every
-// command topic hangs off that same <app> namespace -- the namespace AutoMoveIF
+// <app>/status carrying nepi_app_ui/NepiAppUiStatus, and every
+// command topic hangs off that same <app> namespace -- the namespace UiIF
 // registers its subscribers on.
 //
 // The two selectors are the standard connect components pointed at the connect
@@ -72,13 +72,13 @@ function round(value, decimals = 0) {
 // pub node publishes, and its clicks are routed to status.mouse_event_topic via
 // the viewer's existing mouse_event_topic prop -- no click handling is added to
 // Nepi_IF_ImageViewer itself.
-class NepiAppAutoMove extends Component {
+class NepiAppUi extends Component {
 
   constructor(props) {
     super(props)
 
     this.state = {
-      appName: "app_auto_move",
+      appName: "app_ui",
       appNamespace: null,
 
       // Connect names, one per connect IF the node instantiates. Held here
@@ -168,7 +168,7 @@ class NepiAppAutoMove extends Component {
   // Namespace of this app's ControlsIF, taken from the status message, which
   // publishes it fully qualified. A relative namespace would resolve at the
   // global root once a RUI component appends '/status' and hands it to
-  // rosbridge -- see AutoMoveIF.get_controls_namespace().
+  // rosbridge -- see UiIF.get_controls_namespace().
   getControlsNamespace() {
     const status_msg = this.state.status_msg
     if (status_msg != null && status_msg.controls_namespace) {
@@ -194,7 +194,7 @@ class NepiAppAutoMove extends Component {
       const statusNamespace = namespace + '/status'
       var statusListener = this.props.ros.setupStatusListener(
         statusNamespace,
-        "nepi_app_auto_move/NepiAppAutoMoveStatus",
+        "nepi_app_ui/NepiAppUiStatus",
         this.statusListener
       )
       this.setState({ statusListener: statusListener })
@@ -498,37 +498,37 @@ class NepiAppAutoMove extends Component {
 
           <Label title={"X Forward (m)"}>
             <Input
-              id={"AutoMoveGotoX"}
+              id={"UiGotoX"}
               value={this.state.goto_x}
-              onChange={(e) => this.onUpdateGotoText(e, 'goto_x', 'AutoMoveGotoX')}
-              onKeyDown={(e) => this.onKeyGotoText(e, 'AutoMoveGotoX', appNamespace + "/set_goto_x")}
+              onChange={(e) => this.onUpdateGotoText(e, 'goto_x', 'UiGotoX')}
+              onKeyDown={(e) => this.onKeyGotoText(e, 'UiGotoX', appNamespace + "/set_goto_x")}
             />
           </Label>
 
           <Label title={"Y Left (m)"}>
             <Input
-              id={"AutoMoveGotoY"}
+              id={"UiGotoY"}
               value={this.state.goto_y}
-              onChange={(e) => this.onUpdateGotoText(e, 'goto_y', 'AutoMoveGotoY')}
-              onKeyDown={(e) => this.onKeyGotoText(e, 'AutoMoveGotoY', appNamespace + "/set_goto_y")}
+              onChange={(e) => this.onUpdateGotoText(e, 'goto_y', 'UiGotoY')}
+              onKeyDown={(e) => this.onKeyGotoText(e, 'UiGotoY', appNamespace + "/set_goto_y")}
             />
           </Label>
 
           <Label title={"Z Up (m)"}>
             <Input
-              id={"AutoMoveGotoZ"}
+              id={"UiGotoZ"}
               value={this.state.goto_z}
-              onChange={(e) => this.onUpdateGotoText(e, 'goto_z', 'AutoMoveGotoZ')}
-              onKeyDown={(e) => this.onKeyGotoText(e, 'AutoMoveGotoZ', appNamespace + "/set_goto_z")}
+              onChange={(e) => this.onUpdateGotoText(e, 'goto_z', 'UiGotoZ')}
+              onKeyDown={(e) => this.onKeyGotoText(e, 'UiGotoZ', appNamespace + "/set_goto_z")}
             />
           </Label>
 
           <Label title={"Max Move (m)"}>
             <Input
-              id={"AutoMoveMaxMove"}
+              id={"UiMaxMove"}
               value={this.state.max_move}
-              onChange={(e) => this.onUpdateGotoText(e, 'max_move', 'AutoMoveMaxMove')}
-              onKeyDown={(e) => this.onKeyGotoText(e, 'AutoMoveMaxMove', appNamespace + "/set_max_move")}
+              onChange={(e) => this.onUpdateGotoText(e, 'max_move', 'UiMaxMove')}
+              onKeyDown={(e) => this.onKeyGotoText(e, 'UiMaxMove', appNamespace + "/set_max_move")}
             />
           </Label>
 
@@ -565,10 +565,10 @@ class NepiAppAutoMove extends Component {
           <div hidden={has_max_speed === true}>
             <Label title={"Device Speed (m/s)"}>
               <Input
-                id={"AutoMoveMoveSpeed"}
+                id={"UiMoveSpeed"}
                 value={this.state.move_speed}
-                onChange={(e) => this.onUpdateGotoText(e, 'move_speed', 'AutoMoveMoveSpeed')}
-                onKeyDown={(e) => this.onKeyGotoText(e, 'AutoMoveMoveSpeed', appNamespace + "/set_move_speed")}
+                onChange={(e) => this.onUpdateGotoText(e, 'move_speed', 'UiMoveSpeed')}
+                onKeyDown={(e) => this.onKeyGotoText(e, 'UiMoveSpeed', appNamespace + "/set_move_speed")}
               />
             </Label>
             <Label title={"Robot reports no max speed"} />
@@ -576,37 +576,37 @@ class NepiAppAutoMove extends Component {
 
           <Label title={"X Velocity (m/s)"}>
             <Input
-              id={"AutoMoveGotoVx"}
+              id={"UiGotoVx"}
               value={this.state.goto_vx}
-              onChange={(e) => this.onUpdateGotoText(e, 'goto_vx', 'AutoMoveGotoVx')}
-              onKeyDown={(e) => this.onKeyGotoText(e, 'AutoMoveGotoVx', appNamespace + "/set_goto_vx")}
+              onChange={(e) => this.onUpdateGotoText(e, 'goto_vx', 'UiGotoVx')}
+              onKeyDown={(e) => this.onKeyGotoText(e, 'UiGotoVx', appNamespace + "/set_goto_vx")}
             />
           </Label>
 
           <Label title={"Y Velocity (m/s)"}>
             <Input
-              id={"AutoMoveGotoVy"}
+              id={"UiGotoVy"}
               value={this.state.goto_vy}
-              onChange={(e) => this.onUpdateGotoText(e, 'goto_vy', 'AutoMoveGotoVy')}
-              onKeyDown={(e) => this.onKeyGotoText(e, 'AutoMoveGotoVy', appNamespace + "/set_goto_vy")}
+              onChange={(e) => this.onUpdateGotoText(e, 'goto_vy', 'UiGotoVy')}
+              onKeyDown={(e) => this.onKeyGotoText(e, 'UiGotoVy', appNamespace + "/set_goto_vy")}
             />
           </Label>
 
           <Label title={"Rotational Velocity (deg/s)"}>
             <Input
-              id={"AutoMoveGotoYawRate"}
+              id={"UiGotoYawRate"}
               value={this.state.goto_yaw_rate}
-              onChange={(e) => this.onUpdateGotoText(e, 'goto_yaw_rate', 'AutoMoveGotoYawRate')}
-              onKeyDown={(e) => this.onKeyGotoText(e, 'AutoMoveGotoYawRate', appNamespace + "/set_goto_yaw_rate")}
+              onChange={(e) => this.onUpdateGotoText(e, 'goto_yaw_rate', 'UiGotoYawRate')}
+              onKeyDown={(e) => this.onKeyGotoText(e, 'UiGotoYawRate', appNamespace + "/set_goto_yaw_rate")}
             />
           </Label>
 
           <Label title={"Seconds"}>
             <Input
-              id={"AutoMoveGotoDuration"}
+              id={"UiGotoDuration"}
               value={this.state.goto_duration}
-              onChange={(e) => this.onUpdateGotoText(e, 'goto_duration', 'AutoMoveGotoDuration')}
-              onKeyDown={(e) => this.onKeyGotoText(e, 'AutoMoveGotoDuration', appNamespace + "/set_goto_duration")}
+              onChange={(e) => this.onUpdateGotoText(e, 'goto_duration', 'UiGotoDuration')}
+              onKeyDown={(e) => this.onKeyGotoText(e, 'UiGotoDuration', appNamespace + "/set_goto_duration")}
             />
           </Label>
 
@@ -689,7 +689,7 @@ class NepiAppAutoMove extends Component {
     const publishing = imageTopics.indexOf(overlay_topic) !== -1
     const image_topic = (publishing === true && this.state.connected === true) ? overlay_topic : 'None'
     const image_topic_text = (overlay_topic === 'None') ? 'No Image Selected' :
-      publishing ? 'Auto Move' : 'Waiting for image to publish'
+      publishing ? 'UI' : 'Waiting for image to publish'
 
     return (
       <Columns>
@@ -755,4 +755,4 @@ class NepiAppAutoMove extends Component {
   }
 }
 
-export default NepiAppAutoMove
+export default NepiAppUi

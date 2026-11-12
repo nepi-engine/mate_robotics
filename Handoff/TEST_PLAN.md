@@ -6,7 +6,7 @@
 
 | Stage | Hardware | What it proves |
 |---|---|---|
-| 1. Desk | Any computer; no Teensy, no ROV | Our code passes its own tests, your config is valid, and the handover rules behave as documented |
+| 1. Desk | Any computer; no Teensy, no ROV | Our code passes its own tests, your vehicle file is valid, and the handover rules behave as documented |
 | 2. ESC supply off | Your ROV Pi script, the Teensy, and a fake NEPI | Your hooked script merges correctly with your real sketch, every exit works, and the stick signs |
 | 3. Supply on, thrusters in air, low caps | Plus the ESC supply and the real NEPI driver | Thrusters respond the right way, the smallest useful demands, the IMU mount, and the NEPI exits |
 | 4. In water, on the tether | The whole ROV | Signs and exits in the water, then a careful first hold |
@@ -16,40 +16,42 @@ What we have run, and what we have not, is in [README.md](README.md#status). The
 ## Terms
 
 - **NEPI**: the edge-computing software on your NEPI computer. A NEPI **driver** connects one device. Ours for the ROV is an **RBX** (robot) driver, started by its **discovery** step once it hears your ROV Pi. **IDX** drivers handle cameras. **NavPose** is NEPI's navigation and pose data. The **RUI** is NEPI's browser interface.
-- **nepi_link, NEPI control, pilot mode, takeover point, status, demand**: as defined in [SYSTEM_GUIDE.md](SYSTEM_GUIDE.md#terms).
+- **nepi_link, vehicle file, NEPI control, pilot mode, takeover point, vehicle message, status, demand**: as defined in [SYSTEM_GUIDE.md](SYSTEM_GUIDE.md#terms). On the ROV Pi the vehicle file is `nepi_connect_vehicle.yaml` in your Pi script folder, beside `nepi_link.py`.
 - **fake NEPI**: [fake_nepi.py](../Nepi_Connect/tools/fake_nepi.py), which stands in for NEPI ([PI_INTEGRATION.md](PI_INTEGRATION.md#testing-on-the-desk-with-fake_nepipy)).
 - **`$TNCTL` column N**: the Nth value of a Teensy telemetry line. Columns 1 to 4 are the vertical thrusters and 5 to 8 the horizontal ones, in µs from 1500.
 
 ## Stage 1: Desk, No Teensy
 
-**Needs.** Any computer with Python 3.8 or newer and a mate_robotics checkout. No ROV, Teensy or NEPI.
+**Needs.** Any computer with Python 3.8 or newer, PyYAML (`sudo apt install python3-yaml`) and a mate_robotics checkout. No ROV, Teensy or NEPI.
 
 **1.1 Unit tests.** `-B` keeps Python from writing cache files into the repo.
 
 ```bash
 # [topside] or any computer, from a mate_robotics checkout
 cd Nepi_Connect/pi && python3 -B -m unittest -v test_nepi_link
-cd ../tools && python3 -B -m unittest -v test_rbx_mate_rov_link
+cd ../tools && python3 -B -m unittest -v test_rbx_nepi_connect
 ```
 
 *Pass:* both end in `OK`, with the counts in [README.md](README.md#status).
 
-**1.2 Your config.** Load the file through nepi_link's own loader and validator:
+**1.2 Your vehicle file.** Load the file through the same loader and validator nepi_link runs at start:
 
 ```bash
-# [topside] from a mate_robotics checkout; use the path of the nepi_link.yaml you will put on the ROV Pi
-cd Nepi_Connect/pi && python3 -B -c "import nepi_link as n; c, m = n.load_config_file('../../Handoff/nepi_link_team.yaml'); print(m); print(n.validate_config(c)[1])"
+# [topside] from a mate_robotics checkout; use the path of the vehicle file you will put on the ROV Pi
+cd Nepi_Connect/pi && python3 -B -m nepi_connect.cli --vehicle ../vehicles/mate_coral_crusaders.yaml check
 ```
 
-*Pass:* the second line reads `On: NEPI 192.168.68.103, status to UDP 5700, demands on UDP 5701, triggers 40 to 1023, takeover at stick 8192 and trigger 256, no servos`. Anything that ends in `link off` names the bad key.
+*Pass:* the second line reads `On: vehicle mate_coral_crusaders, NEPI 192.168.68.103, status to UDP 5700, demands on UDP 5701, axes surge, sway, heave, yaw, takeover at 0.25 of travel, no servos, telemetry 20 fields`. Anything that ends in `link off` names the bad key.
 
 **1.3 The handover rules, with nepi_link and the fake NEPI on one computer.** An interactive Python session stands in for your main loop. Both sides use 127.0.0.1, so nothing leaves the computer.
 
 ```bash
-# [topside] terminal 1, from a mate_robotics checkout: a desk copy of the config that names this computer as NEPI
-cd Nepi_Connect/pi && sed 's|^NEPI_LAN_IP: .*|NEPI_LAN_IP: 127.0.0.1|' ../../Handoff/nepi_link_team.yaml > /tmp/nepi_link_desk.yaml
-NEPI_LINK_CONFIG=/tmp/nepi_link_desk.yaml python3 -B
+# [topside] terminal 1, from a mate_robotics checkout: a desk copy of the vehicle file that names this computer as NEPI
+cd Nepi_Connect/pi && sed 's|^  nepi_ip: .*|  nepi_ip: 127.0.0.1|' ../vehicles/mate_coral_crusaders.yaml > /tmp/nepi_connect_desk.yaml
+NEPI_CONNECT_VEHICLE=/tmp/nepi_connect_desk.yaml python3 -B
 ```
+
+`hold` waits for nepi_link's vehicle message before it sends anything, so terminal 2 can start before or after `nepi_link.start()` in terminal 1; until the message arrives it prints a waiting line every 3 s.
 
 ```bash
 # [topside] terminal 2, from a mate_robotics checkout: NEPI ready, asking for surge 0.1
@@ -60,13 +62,13 @@ In terminal 1, type these lines one at a time. `p` is the 18 pilot inputs. Slot 
 
 ```python
 import nepi_link
-nepi_link.start()                      # prints "nepi_link: On: NEPI 127.0.0.1, ..."
+nepi_link.start()                      # prints "nepi_link: On: vehicle mate_coral_crusaders, NEPI 127.0.0.1, ..."
 p = [0] * 18
 nepi_link.topside_tag()                # ',NEPI:OFF': NEPI ready, pilot mode
 p[13] = 1; nepi_link.merge_inputs(p)   # press RB ...
 p[13] = 0; nepi_link.merge_inputs(p)   # ... and release it: NEPI control on
 nepi_link.topside_tag()                # ',NEPI:ON'
-nepi_link.merge_inputs(p)[1]           # -5706: surge 0.1, NEPI_SURGE_SIGN -1
+nepi_link.merge_inputs(p)[1]           # -5706: surge 0.1, control.axes.surge.sign -1
 p[1] = -5000; nepi_link.merge_inputs(p)[1]   # -5706 still: under the takeover point, the pilot's LY is ignored
 p[1] = -9000; nepi_link.merge_inputs(p)[1]   # -9000: past the takeover point, NEPI control ends at once
 nepi_link.topside_tag()                # ',NEPI:OFF'
@@ -97,15 +99,15 @@ nepi_link prints each kind of message at most once per 10 s, so a repeated "RB i
 - The Teensy running the sketch you fly, and the topside with your controller.
 - **The ESC supply switched off**, so no thruster can move. Judge everything by the `$TNCTL` values and the status lines.
 
-**Setup.** For this stage the fake NEPI runs on the topside, so point `NEPI_LAN_IP` at the topside. Remember to set it back.
+**Setup.** For this stage the fake NEPI runs on the topside, so point `network.nepi_ip` in your vehicle file at the topside. Remember to set it back.
 
 ```bash
 # [ROV Pi] in your Pi script folder: name the topside as NEPI for this stage only
-sed -i 's|^NEPI_LAN_IP: .*|NEPI_LAN_IP: 192.168.68.12|' nepi_link.yaml
+sed -i 's|^  nepi_ip: .*|  nepi_ip: 192.168.68.12|' nepi_connect_vehicle.yaml
 ```
 
 1. Start the topside script first, then your Pi script ([SAFETY.md](SAFETY.md#rov-26-findings), finding 10).
-2. Check that your Pi script prints `nepi_link: On: NEPI 192.168.68.12, ...` before its main loop.
+2. Check that your Pi script prints `nepi_link: On: vehicle mate_coral_crusaders, NEPI 192.168.68.12, ...` before its main loop.
 3. On the topside, in a second terminal, start the fake NEPI:
 
 ```bash
@@ -117,17 +119,17 @@ python3 Nepi_Connect/tools/fake_nepi.py --pi 192.168.68.22 hold --surge 0.1 --se
 
 | # | Do | Expect | Tested by us |
 |---|---|---|---|
-| 2.1 | Nothing | The topside line ends in `,NEPI:OFF,*FF`. fake_nepi prints status lines with `ready yes`, and `tn` with your eight thruster values. | Yes |
+| 2.1 | Nothing | The topside line ends in `,NEPI:OFF,*FF`. fake_nepi prints your vehicle message once, then status lines with `ready yes`, and a `raw` part that starts with your eight thruster values. | Yes |
 | 2.2 | Fly the sticks as usual | Your `$TNCTL` values follow exactly as without nepi_link | Yes |
-| 2.3 | RB | `assist ON pilot_button`, `out_ly -5706`, tag `,NEPI:ON`. Columns 5 to 8 show your sketch's response: -34 in rov-26 normal mode, -17 in slow mode, the same sign your pilot's forward stick gives. | Yes |
-| 2.4 | **New:** push LY slowly past a quarter of its travel | NEPI control ends (`pilot_stick`) as LY passes 8192, and `out_ly` follows your stick at once | No |
+| 2.3 | RB | `control ON pilot_button`, `ABS_Y -5706`, tag `,NEPI:ON`. Columns 5 to 8 show your sketch's response: -34 in rov-26 normal mode, -17 in slow mode, the same sign your pilot's forward stick gives. | Yes |
+| 2.4 | **New:** push LY slowly past a quarter of its travel | NEPI control ends (`pilot_stick`) as LY passes 8192, and `ABS_Y` follows your stick at once | No |
 | 2.5 | **New:** RB to hand over, then RB again | `pilot_button` both ways | No |
 | 2.6 | **New:** hold LX past a quarter, press RB | Ignored; the ROV Pi prints `RB ignored: release LX first` | No |
 | 2.7 | **New:** RB to hand over, then Ctrl+\\ on fake_nepi | `,NEPI:WAIT` and every movement output 0 within 0.25 s; `,NEPI:NOTREADY` and `timeout` after 2 s. Watch the reason with `fake_nepi.py --pi 192.168.68.22 watch`. | No |
 | 2.8 | **New:** RB to hand over, then Ctrl+C on fake_nepi | NEPI control ends at once, as `nepi_off` | No |
 | 2.9 | **New:** RB with fake_nepi stopped | Ignored; tag `,NEPI:NOTREADY` | No |
 | 2.10 | **New:** send junk to the demand port from the topside: `echo junk \| nc -u -w1 192.168.68.22 5701` | `demand_bad` rises by 1 and nothing else changes (assumes `nc` is installed) | No |
-| 2.11 | Stick signs: [Part A below](#part-a-signs-with-no-thrust) | Each `NEPI_*_SIGN` decided | Surge only |
+| 2.11 | Stick signs: [Part A below](#part-a-signs-with-no-thrust) | Each `control.axes.<axis>.sign` decided | Surge only |
 
 *Pass:* every row as listed. RB and the takeover hand back within one serial frame (0.1 s).
 
@@ -135,7 +137,7 @@ python3 Nepi_Connect/tools/fake_nepi.py --pi 192.168.68.22 hold --surge 0.1 --se
 
 ```bash
 # [ROV Pi] in your Pi script folder
-sed -i 's|^NEPI_LAN_IP: .*|NEPI_LAN_IP: 192.168.68.103|' nepi_link.yaml
+sed -i 's|^  nepi_ip: .*|  nepi_ip: 192.168.68.103|' nepi_connect_vehicle.yaml
 ```
 
 ## Stage 3: Supply On, Thrusters in Air, Low Caps
@@ -143,10 +145,10 @@ sed -i 's|^NEPI_LAN_IP: .*|NEPI_LAN_IP: 192.168.68.103|' nepi_link.yaml
 **Needs.**
 - Stage 2 passed.
 - One person on the supply switch.
-- Caps lowered: `NEPI_MAX_SURGE`, `NEPI_MAX_SWAY` and `NEPI_MAX_HEAVE` at 0.1, and `NEPI_MAX_YAW` at 0 until finding 1 is checked ([SAFETY.md](SAFETY.md#rules-for-the-first-powered-tests)).
+- Caps lowered in the vehicle file: `control.axes.surge.cap`, `control.axes.sway.cap` and `control.axes.heave.cap` at 0.1, and `control.axes.yaw.cap` at 0 until finding 1 is checked ([SAFETY.md](SAFETY.md#rules-for-the-first-powered-tests)). If the NEPI driver is running when you change a cap and restart your Pi script, it warns once that the vehicle message changed; disable and enable it to match.
 - The ROV out of the water and held still, propellers clear. A T200 runs at most 10 s in air.
 
-**3.1 With the fake NEPI** (`NEPI_LAN_IP` at the topside, as in stage 2):
+**3.1 With the fake NEPI** (`network.nepi_ip` at the topside, as in stage 2):
 
 | # | Do | Expect |
 |---|---|---|
@@ -155,16 +157,16 @@ sed -i 's|^NEPI_LAN_IP: .*|NEPI_LAN_IP: 192.168.68.103|' nepi_link.yaml
 | 3.1c | Raise `--surge` in steps of 0.01 from 0.02 until a thruster turns | The smallest useful surge. Compare it with [SAFETY.md](SAFETY.md#the-esc-deadband-and-the-smallest-useful-demand); repeat in slow mode and for sway. |
 | 3.1d | **New:** each of stage 2's exits (2.4 to 2.8) once, with thrust | The thrusters return to the pilot's command at once (RB, takeover), go neutral within 0.25 s, and stop being NEPI's after 2 s (timeout) |
 
-**3.2 With the real NEPI** (`NEPI_LAN_IP` at 192.168.68.103, the driver installed and enabled, [NEPI_SETUP.md](NEPI_SETUP.md)):
+**3.2 With the real NEPI** (`network.nepi_ip` at 192.168.68.103, the driver installed and enabled, [NEPI_SETUP.md](NEPI_SETUP.md)):
 
 | # | Do | Expect | Tested by us |
 |---|---|---|---|
-| 3.2a | Nothing | The topside tag reads `,NEPI:OFF`. The RUI Robots page shows `mate_rov_link_robot` in state `PILOT`, and NavPose depth changes with the sensor. | Depth: yes |
+| 3.2a | Nothing | The topside tag reads `,NEPI:OFF`. The RUI Robots page shows `nepi_connect_mate_coral_crusaders` in state `PILOT`, and NavPose depth changes with the sensor. | Depth: yes |
 | 3.2b | RB, then RUI Teleop W for a moment | State `NEPI`; the horizontal thrusters push forward. Mind that E and D move left and counter-clockwise ([NEPI_SETUP.md](NEPI_SETUP.md#teleop-from-the-robots-page)). | Thruster moved: yes; direction: no |
 | 3.2c | **New:** RUI Set State PILOT during NEPI control | NEPI control ends at once (`nepi_off`), and the state shows `PILOT` | No |
 | 3.2d | **New:** disable the driver during NEPI control | NEPI control ends at once (`nepi_off`) or, at the latest, after 2 s (`timeout`) | No |
 | 3.2e | **New:** stop your Pi script while watching `link_status` | `link_up` goes false within 0.5 s. Restart the topside script, then the Pi script: the link comes back without restarting NEPI. | No |
-| 3.2f | **New:** start the driver before the Pi script | The driver starts once the Pi script sends status | No |
+| 3.2f | **New:** start the driver before the Pi script | The driver starts once the Pi script sends its vehicle message | No |
 | 3.2g | IMU mount: [Part B below](#part-b-the-imu-mount) | `imu_mount` set | No |
 | 3.2h | Heading hold: triggers released, turn the ROV a little by hand | `$TNCTL` column 19 opposes the turn (the hold corrects) and does not follow it (runs away) | No |
 | 3.2i | 10 minutes idle with the link up | `status_bad` on `link_status` stays 0 | No |
@@ -177,7 +179,7 @@ scp -P 2222 -i ~/.ssh/nepi_default_ssh_key Nepi_Connect/tools/sample_link_rates.
 
 ```bash
 # [NEPI] in a container shell where rostopic works; its built-in namespace is our bench device, so pass yours
-python3 sample_link_rates.py /nepi/<device_id>/mate_rov_link_robot 60
+python3 sample_link_rates.py /nepi/<device_id>/nepi_connect_mate_coral_crusaders 60
 ```
 
 *Pass:* every row as listed, with each sign confirmed by thrust direction.
@@ -199,7 +201,7 @@ python3 sample_link_rates.py /nepi/<device_id>/mate_rov_link_robot 60
 
 ```bash
 # [NEPI] a brief, small surge in NEPI control; Ctrl+C stops it, and the demand goes neutral 0.5 s later
-rostopic pub -r 5 /nepi/<device_id>/mate_rov_link_robot/rbx/set_teleop_velocity geometry_msgs/Twist '{linear: {x: 0.1}}'
+rostopic pub -r 5 /nepi/<device_id>/nepi_connect_mate_coral_crusaders/nepi_connect_mate_coral_crusaders/rbx/set_teleop_velocity geometry_msgs/Twist '{linear: {x: 0.1}}'
 ```
 
 *Pass:* every row as listed. After that, how far to take the caps and how to tune a hold is your call.
@@ -208,16 +210,16 @@ rostopic pub -r 5 /nepi/<device_id>/mate_rov_link_robot/rbx/set_teleop_velocity 
 
 ### Part A: signs with no thrust
 
-Your pilots already fly the ROV correctly, so each sign only has to make NEPI's positive demand produce the same input value as the pilot's matching stick direction. Use stage 2's setup, with `fake_nepi.py ... watch` in a second topside terminal to see `out_ly`, `out_lx`, `out_ry`, `out_lt` and `out_rt`.
+Your pilots already fly the ROV correctly, so each sign only has to make NEPI's positive demand produce the same input value as the pilot's matching stick direction. Use stage 2's setup, with `fake_nepi.py ... watch` in a second topside terminal to see `ABS_Y` (LY), `ABS_X` (LX), `ABS_RY` (RY), `ABS_Z` (LT) and `ABS_RZ` (RT).
 
 | Key | Pilot input to read (pilot mode) | NEPI demand to compare (NEPI control) | Set the sign to |
 |---|---|---|---|
-| `NEPI_SURGE_SIGN` | LY pushed the way your pilots fly forward; note the sign of `out_ly` | `hold --surge 0.1` | Keep it if `out_ly` has the same sign as the pilot's; flip it if not |
-| `NEPI_SWAY_SIGN` | LX pushed the way your pilots move right; `out_lx` | `hold --sway 0.1` | The same rule, on `out_lx` |
-| `NEPI_HEAVE_SIGN` | RY pushed the way your pilots dive (go deeper); `out_ry` | `hold --heave 0.1` (heave is positive down) | The same rule, on `out_ry` |
-| `NEPI_YAW_SIGN` | The trigger your pilots use to turn clockwise seen from above (turn right) | `hold --yaw 0.1` (positive is clockwise) | Keep it if NEPI's value appears on that same trigger (`out_lt` or `out_rt`); flip it if it appears on the other |
+| `control.axes.surge.sign` | LY pushed the way your pilots fly forward; note the sign of `ABS_Y` | `hold --surge 0.1` | Keep it if `ABS_Y` has the same sign as the pilot's; flip it if not |
+| `control.axes.sway.sign` | LX pushed the way your pilots move right; `ABS_X` | `hold --sway 0.1` | The same rule, on `ABS_X` |
+| `control.axes.heave.sign` | RY pushed the way your pilots dive (go deeper); `ABS_RY` | `hold --heave 0.1` (heave is positive down) | The same rule, on `ABS_RY` |
+| `control.axes.yaw.sign` | The trigger your pilots use to turn clockwise seen from above (turn right) | `hold --yaw 0.1` (positive is clockwise) | Keep it if NEPI's value appears on that same trigger (`ABS_Z` or `ABS_RZ`); flip it if it appears on the other |
 
-Change `nepi_link.yaml`, then restart the topside script and your Pi script. On our bench, rov-26 code with a stock Xbox pad gave `NEPI_SURGE_SIGN` -1: LY pushed forward reads negative. The other three we have not measured.
+Change the sign in your vehicle file, `nepi_connect_vehicle.yaml`, then restart the topside script and your Pi script. On our bench, rov-26 code with a stock Xbox pad gave `control.axes.surge.sign` -1: LY pushed forward reads negative. The other three we have not measured.
 
 Part A trusts your pilots' own directions. Stage 3 confirms each sign with thrust, and stage 4 in the water.
 

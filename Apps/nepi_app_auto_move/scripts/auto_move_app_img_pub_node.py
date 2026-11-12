@@ -39,7 +39,7 @@ from nepi_sdk import nepi_img
 from nepi_api.messages_if import MsgIF
 from nepi_api.node_if import NodeClassIF
 from nepi_api.system_if import SaveDataIF
-from nepi_api.data_if import ColorImageIF
+from nepi_api.data_product_if_image import ColorImageIF
 
 
 # The obstacle overlay layer is optional, exactly as in auto_move_if.py: without
@@ -264,16 +264,16 @@ class AutoMoveImgPub:
         ###############################
         # Create System IFs
 
-        # Setup Save Data IF. pub_status is False because the parent node owns
-        # the save_data status topic on this same namespace; this instance is
-        # only here so the image data product honors the same save commands.
+        # Setup Save Data IF. This instance is only here so the image data
+        # product honors the same save commands. The 3.4 SaveDataIF has no
+        # pub_status, so it also publishes the save_data status on this
+        # namespace.
         factory_data_rates = {}
         for d in self.data_products:
             factory_data_rates[d] = [1.0, 0.0, 100]
 
         self.save_data_if = SaveDataIF(namespace = self.app_namespace,
                         data_products = self.data_products,
-                        pub_status = False,
                         factory_rate_dict = factory_data_rates,
                         msg_if = self.msg_if,
                         node_if = self.node_if
@@ -512,7 +512,8 @@ class AutoMoveImgPub:
                                                              self.depthMapImageCb, queue_size = 1)
             self.msg_if.pub_info('Subscribing to depth map image: ' + str(depth_map_image_topic))
 
-        img_if = ColorImageIF(namespace = pub_namespace,
+        img_if = ColorImageIF(name = self.OVERLAY_IMG_DATA_PRODUCT,
+                        namespace = pub_namespace,
                         data_product = self.OVERLAY_IMG_DATA_PRODUCT,
                         data_source_description = 'image',
                         data_ref_description = 'image',

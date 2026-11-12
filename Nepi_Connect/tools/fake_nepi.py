@@ -8,26 +8,29 @@
 ## License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
 ##
 
-# Stands in for NEPI on the bench, so the control Pi's nepi_link.py can be
-# tested without the NEPI device and rbx_mate_rov_link.
+# Stands in for NEPI on the bench, so a robot's nepi_connect can be tested
+# without the NEPI device and rbx_nepi_connect.
 #
-# It speaks the NEPI side of Nepi_Connect/LINK_PROTOCOL.md: it receives the
-# Pi's status on UDP 5700 and sends demands to the Pi's UDP 5701. The Pi
-# accepts demands only from its NEPI_LAN_IP, so when this runs on the bench
-# laptop, the Pi's nepi_link.yaml must say NEPI_LAN_IP: 192.168.68.12
+# It speaks the NEPI side of Nepi_Connect/LINK_PROTOCOL.md, version 2: it
+# receives the robot's vehicle and status messages on UDP 5700 and sends
+# demands to the demand port the vehicle message announces. The robot accepts
+# demands only from its vehicle file's network.nepi_ip, so when this runs on
+# the bench laptop, that must be the laptop's address, 192.168.68.12
 # (BENCH_SETUP_PLAN.md P9, "Bench install").
 #
 #   python3 fake_nepi.py --pi 192.168.68.22 watch
-#       One line per status: NEPI control (assist), the reason it last
-#       changed, whether the Pi counts NEPI as ready, the merged LY, LX, RY, LT
-#       and RT the Pi handed the Teensy, dropped demands, and the Teensy's
-#       eight thruster values when present.
+#       Prints the vehicle message once, and again whenever it changes. Then
+#       one line per status: NEPI control, the reason it last changed, whether
+#       the robot counts NEPI as ready, each axis input's merged value,
+#       dropped demands, the navigation values and the raw values when present.
 #   python3 fake_nepi.py --pi 192.168.68.22 hold --surge 0.05 --seconds 10
-#       Sends active true with the given surge, sway, heave and yaw at 10 Hz, so the
-#       Pi counts NEPI as ready, and prints each status. The pilot's RB then
-#       hands the ROV to it (BENCH_SETUP_PLAN.md D3); RB again, a movement
-#       input past the takeover point, or the Pi's 2 s timeout hands it back,
-#       and RB can hand it over again while this keeps running. On finish or
+#       Waits for the vehicle message (as long as it takes), then sends active true with the given
+#       surge, sway, heave and yaw at 10 Hz (only the axes the robot
+#       announced), so the robot counts NEPI as ready, and prints each status.
+#       The pilot's toggle input (RB on the MATE ROV) then hands the robot to
+#       it (BENCH_SETUP_PLAN.md D3); the toggle again, an axis input past the
+#       takeover point, or the robot's 2 s timeout hands it back, and the
+#       toggle can hand it over again while this keeps running. On finish or
 #       Ctrl+C it sends active false for 0.5 s, which ends NEPI control at
 #       once (nepi_off). Ctrl+\ quits with no active false, to test the timeout.
 #
@@ -43,38 +46,49 @@ import threading
 import time
 
 
-DEMAND_PERIOD_SEC = 0.1 # 10 Hz, the Pi's serial write rate
+DEMAND_PERIOD_SEC = 0.1 # 10 Hz, the robot's control loop rate
 RELEASE_SEC = 0.5 # Time spent sending active false after a hold
+VEHICLE_WAIT_SEC = 3.0 # hold says it is still waiting for the vehicle message this often
 MAX_DATAGRAM_BYTES = 1200
+PROTOCOL_VERSION = 2
+AXIS_NAMES = ['surge', 'sway', 'heave', 'yaw']
 
 
-def make_demand(seq, active, surge = 0.0, sway = 0.0, yaw = 0.0, heave = 0.0):
-    """Build one demand message (LINK_PROTOCOL "Demand: NEPI to Pi").
+def make_demand(seq, active, surge = 0.0, sway = 0.0, yaw = 0.0, heave = 0.0, axis_names = None, servos = None):
+    """Build one demand message (LINK_PROTOCOL "Demand: NEPI to Robot").
 
     Args:
         seq (int): Sequence number, 0 to 4294967295.
-        active (bool): NEPI is connected and ready to take the ROV.
+        active (bool): NEPI is connected and ready to take the robot.
         surge (float): -1 to 1, positive forward.
         sway (float): -1 to 1, positive right.
         yaw (float): -1 to 1, positive clockwise seen from above.
         heave (float): -1 to 1, positive down.
+        axis_names (list): The axes to send, as the vehicle message announced
+            them (default: all four).
+        servos (dict): Servo name to value, -1 to 1 (default: none).
 
     Returns:
-        dict: The demand, with pitch and roll 0 as version 1 requires.
+        dict: The demand.
     """
-    return {'v': 1, 'type': 'demand', 'seq': int(seq), 't': round(time.time(), 3), 'active': bool(active),
-            'surge': float(surge), 'sway': float(sway), 'heave': float(heave), 'yaw': float(yaw),
-            'pitch': 0.0, 'roll': 0.0}
+    if axis_names is None:
+        axis_names = AXIS_NAMES
+    values = dict(surge = float(surge), sway = float(sway), heave = float(heave), yaw = float(yaw))
+    return {'v': PROTOCOL_VERSION, 'type': 'demand', 'seq': int(seq), 't': round(time.time(), 3),
+            'active': bool(active), 'axes': dict((name, values[name]) for name in AXIS_NAMES if name in axis_names),
+            'servos': dict(servos or dict())}
 
 
 class DemandSender(object):
-    """Send demand datagrams to one Pi's nepi_link.
+    """Send demand datagrams to one robot's nepi_connect.
 
-    seq starts at 0 and goes up by 1 per demand sent.
+    seq starts at 0 and goes up by 1 per demand sent. axis_names limits each
+    demand to the axes the robot announced (default: all four).
     """
 
-    def __init__(self, pi_ip, port = 5701):
+    def __init__(self, pi_ip, port = 5701, axis_names = None):
         self.address = (str(pi_ip), int(port))
+        self.axis_names = axis_names
         self.seq = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -91,7 +105,7 @@ class DemandSender(object):
         Returns:
             list: [success (bool), msg (str)].
         """
-        datagram = json.dumps(make_demand(self.seq, active, surge, sway, yaw, heave),
+        datagram = json.dumps(make_demand(self.seq, active, surge, sway, yaw, heave, self.axis_names),
                               separators = (',', ':')).encode('utf-8')
         self.seq = (self.seq + 1) & 0xFFFFFFFF
         try:
@@ -106,11 +120,12 @@ class DemandSender(object):
 
 
 class StatusReceiver(object):
-    """Receive nepi_link status datagrams from one Pi.
+    """Receive nepi_connect vehicle and status datagrams from one robot.
 
     A background thread reads the UDP port. Datagrams from any other address,
-    or that are not a version 1 status object, are counted and dropped.
-    Callers collect new statuses with get_statuses().
+    or that are not a version 2 vehicle or status object, are counted and
+    dropped. Callers collect new statuses with get_statuses() and the newest
+    vehicle message with get_vehicle().
     """
 
     SOCKET_TIMEOUT_SEC = 0.2 # How often the receive thread checks for stop
@@ -123,6 +138,8 @@ class StatusReceiver(object):
         self.lock = threading.Lock()
         self.cond = threading.Condition(self.lock)
         self.queue = []
+        self.vehicle = None # The newest vehicle message
+        self.vehicle_count = 0
         self.status_count = 0
         self.bad_count = 0
         self.last_error = ''
@@ -150,7 +167,7 @@ class StatusReceiver(object):
         self.recv_thread = threading.Thread(target = self.runRecvThread, args = [sock, self.stop_event])
         self.recv_thread.daemon = True
         self.recv_thread.start()
-        return True, 'Receiving status from ' + self.pi_ip + ' on UDP port ' + str(self.port)
+        return True, 'Receiving vehicle and status messages from ' + self.pi_ip + ' on UDP port ' + str(self.port)
 
     def stop(self):
         """Stop receiving and close the UDP port.
@@ -183,15 +200,35 @@ class StatusReceiver(object):
             self.queue = []
             return statuses
 
+    def get_vehicle(self, wait_sec = 0.0):
+        """Return the newest vehicle message.
+
+        Args:
+            wait_sec (float): Longest wait for the first one, in seconds.
+
+        Returns:
+            dict: The vehicle message, or None when none has arrived.
+        """
+        end = time.monotonic() + wait_sec
+        with self.cond:
+            while self.vehicle is None:
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.cond.wait(remaining)
+            return self.vehicle
+
     def get_health(self):
         """Report counts for display.
 
         Returns:
-            dict: status_count (int) -- statuses accepted; bad_count (int) --
-                datagrams dropped; last_error (str) -- why the latest was dropped.
+            dict: status_count (int) -- statuses accepted; vehicle_count (int)
+                -- vehicle messages accepted; bad_count (int) -- datagrams
+                dropped; last_error (str) -- why the latest was dropped.
         """
         with self.lock:
-            return dict(status_count = self.status_count, bad_count = self.bad_count, last_error = self.last_error)
+            return dict(status_count = self.status_count, vehicle_count = self.vehicle_count,
+                        bad_count = self.bad_count, last_error = self.last_error)
 
 
     def runRecvThread(self, sock, stop_event):
@@ -220,8 +257,15 @@ class StatusReceiver(object):
         except Exception as e:
             self.recordBad('Status dropped: not UTF-8 JSON (' + str(e) + ')')
             return
-        if not isinstance(status, dict) or status.get('v') != 1 or status.get('type') != 'status':
-            self.recordBad('Datagram dropped: not a version 1 status')
+        if (not isinstance(status, dict) or status.get('v') != PROTOCOL_VERSION or
+                status.get('type') not in ['status', 'vehicle']):
+            self.recordBad('Datagram dropped: not a version 2 vehicle or status message')
+            return
+        if status['type'] == 'vehicle':
+            with self.cond:
+                self.vehicle_count += 1
+                self.vehicle = status
+                self.cond.notify_all()
             return
         with self.cond:
             self.status_count += 1
@@ -239,20 +283,41 @@ class StatusReceiver(object):
 #**********************
 # Command line
 
+def formatVehicle(vehicle):
+    axes = vehicle.get('axes')
+    axes_text = 'none'
+    if isinstance(axes, dict) and len(axes) > 0:
+        axes_text = ', '.join(str(name) + ' cap ' + str(cap) for (name, cap) in axes.items())
+    cameras = vehicle.get('cameras')
+    cameras_text = 'none'
+    if isinstance(cameras, list) and len(cameras) > 0:
+        cameras_text = ', '.join(str(camera.get('name')) + ' ' + str(camera.get('transport')) + ':' +
+                                 str(camera.get('port')) for camera in cameras if isinstance(camera, dict))
+    def names(key):
+        value = vehicle.get(key)
+        if isinstance(value, list) and len(value) > 0:
+            return ', '.join(str(item) for item in value)
+        return 'none'
+    return ('Vehicle ' + str(vehicle.get('name')) + ' (' + str(vehicle.get('kind')) + '), demands to UDP ' +
+            str(vehicle.get('demand_port')) + '\n  axes: ' + axes_text + '\n  servos: ' + names('servos') +
+            '\n  nav: ' + names('nav') + '\n  raw: ' + names('raw') + '\n  cameras: ' + cameras_text +
+            '\n  imu_mount: ' + str(vehicle.get('imu_mount')))
+
 def formatStatus(status):
-    line = ('assist ' + ('ON ' if status.get('assist') else 'off') +
-            ' ' + str(status.get('assist_reason', '?')).ljust(12) +
-            ' ready ' + ('yes' if status.get('nepi_ready') else 'no ') +
-            ' out_ly ' + str(status.get('out_ly')).rjust(6) +
-            ' out_lx ' + str(status.get('out_lx')).rjust(6) +
-            ' out_ry ' + str(status.get('out_ry')).rjust(6) +
-            ' out_lt ' + str(status.get('out_lt')).rjust(4) +
-            ' out_rt ' + str(status.get('out_rt')).rjust(4) +
-            ' demand_bad ' + str(status.get('demand_bad')))
-    tn = status.get('tn')
-    if isinstance(tn, dict):
-        names = ['vfl_pwr', 'vfr_pwr', 'vbl_pwr', 'vbr_pwr', 'hfl_pwr', 'hfr_pwr', 'hbl_pwr', 'hbr_pwr']
-        line += ' | tn ' + ','.join(str(tn.get(name)) for name in names)
+    line = ('control ' + ('ON ' if status.get('control') else 'off') +
+            ' ' + str(status.get('control_reason', '?')).ljust(12) +
+            ' ready ' + ('yes' if status.get('nepi_ready') else 'no '))
+    out = status.get('out')
+    if isinstance(out, dict):
+        for (name, value) in out.items():
+            line += ' ' + str(name) + ' ' + str(value).rjust(6)
+    line += ' demand_bad ' + str(status.get('demand_bad'))
+    nav = status.get('nav')
+    if isinstance(nav, dict) and len(nav) > 0:
+        line += ' | nav ' + ','.join(str(name) + '=' + str(value) for (name, value) in nav.items())
+    raw = status.get('raw')
+    if isinstance(raw, dict) and len(raw) > 0:
+        line += ' | raw ' + ','.join(str(value) for value in raw.values())
     return line
 
 def demandFraction(text):
@@ -267,6 +332,16 @@ def positiveSeconds(text):
         raise argparse.ArgumentTypeError('must be more than 0')
     return value
 
+def printVehicleChange(receiver, shown):
+    # Prints the vehicle message when it is new or changed; returns the one shown
+    vehicle = receiver.get_vehicle()
+    if vehicle is None:
+        return shown
+    body = dict((key, value) for (key, value) in vehicle.items() if key not in ['seq', 't'])
+    if body != shown:
+        print(formatVehicle(vehicle))
+    return body
+
 def printStatuses(receiver, wait_sec, quiet_since):
     statuses = receiver.get_statuses(wait_sec)
     for status in statuses:
@@ -276,7 +351,7 @@ def printStatuses(receiver, wait_sec, quiet_since):
         return statuses, now
     if now - quiet_since >= 2.0:
         health = receiver.get_health()
-        msg = 'No status from the Pi for ' + str(int(now - quiet_since)) + ' s'
+        msg = 'No status from the robot for ' + str(int(now - quiet_since)) + ' s'
         if health['last_error'] != '':
             msg += ' (last dropped: ' + health['last_error'] + ')'
         print(msg)
@@ -285,7 +360,9 @@ def printStatuses(receiver, wait_sec, quiet_since):
 
 def runWatch(receiver):
     quiet_since = time.monotonic()
+    shown = None
     while True:
+        shown = printVehicleChange(receiver, shown)
         [statuses, quiet_since] = printStatuses(receiver, 0.2, quiet_since)
 
 def sendFor(sender, receiver, seconds, active, surge = 0.0, sway = 0.0, yaw = 0.0):
@@ -306,7 +383,7 @@ def sendFor(sender, receiver, seconds, active, surge = 0.0, sway = 0.0, yaw = 0.
 def runHold(args, receiver, sender):
     print('Ready with surge ' + str(args.surge) + ', sway ' + str(args.sway) + ', heave ' + str(args.heave) +
           ', yaw ' + str(args.yaw) + ' for ' + str(args.seconds) +
-          ' s. Press RB on the controller to hand the ROV to NEPI.')
+          ' s. Press the toggle input on the controller (RB on the MATE ROV) to hand the robot to NEPI.')
     try:
         was_on = False
         end = time.monotonic() + args.seconds
@@ -322,12 +399,13 @@ def runHold(args, receiver, sender):
                 next_send += DEMAND_PERIOD_SEC
             for status in receiver.get_statuses(max(0.0, min(next_send, end) - time.monotonic())):
                 print(formatStatus(status))
-                on = bool(status.get('assist'))
+                on = bool(status.get('control'))
                 if on != was_on:
                     if on:
-                        print('NEPI control on (' + str(status.get('assist_reason')) + ')')
+                        print('NEPI control on (' + str(status.get('control_reason')) + ')')
                     else:
-                        print('NEPI control off (' + str(status.get('assist_reason')) + '); RB hands it over again')
+                        print('NEPI control off (' + str(status.get('control_reason')) +
+                              '); the toggle input hands it over again')
                     was_on = on
     except KeyboardInterrupt:
         print('Stopping')
@@ -339,16 +417,16 @@ def runHold(args, receiver, sender):
             pass
 
 def main():
-    parser = argparse.ArgumentParser(description = 'Stand in for NEPI: watch nepi_link status and send demands.')
+    parser = argparse.ArgumentParser(description = 'Stand in for NEPI: watch nepi_connect messages and send demands.')
     parser.add_argument('--pi', default = '192.168.68.22',
-                        help = 'The control Pi: the only accepted status sender, and where demands go (default 192.168.68.22)')
+                        help = 'The robot: the only accepted sender, and where demands go (default 192.168.68.22)')
     parser.add_argument('--status-port', type = int, default = 5700,
-                        help = 'UDP port to receive status on (default 5700)')
-    parser.add_argument('--demand-port', type = int, default = 5701,
-                        help = "The Pi's UDP port for demands (default 5701)")
+                        help = 'UDP port to receive vehicle and status messages on (default 5700)')
+    parser.add_argument('--demand-port', type = int, default = None,
+                        help = "The robot's UDP port for demands (default: as its vehicle message announces)")
     commands = parser.add_subparsers(dest = 'command')
-    commands.add_parser('watch', help = 'Print one line per status')
-    hold = commands.add_parser('hold', help = 'Stay ready with a fixed demand; RB on the controller hands over')
+    commands.add_parser('watch', help = 'Print the vehicle message, then one line per status')
+    hold = commands.add_parser('hold', help = 'Stay ready with a fixed demand; the toggle input hands over')
     hold.add_argument('--surge', type = demandFraction, default = 0.0, help = 'Surge, -1 to 1, positive forward (default 0)')
     hold.add_argument('--sway', type = demandFraction, default = 0.0, help = 'Sway, -1 to 1, positive right (default 0)')
     hold.add_argument('--heave', type = demandFraction, default = 0.0, help = 'Heave, -1 to 1, positive down (default 0)')
@@ -370,7 +448,21 @@ def main():
             print('Ctrl+C quits.')
             runWatch(receiver)
         else:
-            sender = DemandSender(args.pi, args.demand_port)
+            # Waits as long as it takes, so this can start before the robot
+            # does; with --demand-port it sends to all four axes at once
+            vehicle = receiver.get_vehicle(VEHICLE_WAIT_SEC)
+            while vehicle is None and args.demand_port is None:
+                print('Waiting for a vehicle message from ' + args.pi + ' (Ctrl+C quits; --demand-port sends without one)')
+                vehicle = receiver.get_vehicle(VEHICLE_WAIT_SEC)
+            axis_names = None
+            demand_port = args.demand_port
+            if vehicle is not None:
+                print(formatVehicle(vehicle))
+                if isinstance(vehicle.get('axes'), dict):
+                    axis_names = list(vehicle['axes'].keys())
+                if demand_port is None:
+                    demand_port = vehicle.get('demand_port')
+            sender = DemandSender(args.pi, demand_port, axis_names)
             runHold(args, receiver, sender)
     except KeyboardInterrupt:
         pass

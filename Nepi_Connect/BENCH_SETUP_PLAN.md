@@ -1,5 +1,7 @@
 # Bench Setup Plan: Coral Crusaders ROV Replica, Then NEPI Stabilization
 
+> **Note (2026-11-11):** this plan records protocol version 1 and the `rbx_mate_rov_link` driver. The link is now protocol version 2 and the driver `rbx_nepi_connect`, set up by a vehicle file on the Pi; see [LINK_PROTOCOL.md](LINK_PROTOCOL.md).
+
 ## Goal
 
 Build a working copy of the Coral Crusaders' ROV control system on the bench, using the team's own code. A game controller on the topside laptop drives eight thrusters through the control Raspberry Pi and the Teensy, and the pilot sees camera video, exactly as on the team's robot. Then add NEPI: first watching only, then one control that starts stabilization mode on the NEPI Raspberry Pi 5. In stabilization mode NEPI holds position and orientation. Its commands reach the Teensy only through the control Pi; NEPI never talks to the Teensy directly. The thrusters and ESCs are here now and the Teensy 4.1 arrives on 2026-10-20, so everything that does not need the Teensy is done on 2026-10-19.
