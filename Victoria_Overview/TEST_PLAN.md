@@ -11,7 +11,7 @@
 | 3. Supply on, thrusters in air, low caps | Plus the ESC supply and the real NEPI driver | Thrusters respond the right way, the smallest useful demands, the IMU mount, and the NEPI exits |
 | 4. In water, on the tether | The whole ROV | Signs and exits in the water, then a careful first hold |
 
-What we have run, and what we have not, is in [README.md](README.md#status). The exit tests marked **new** below have not been run by us under the current RB-toggle design.
+What we have run, and what we have not, is in [INTEGRATION_HANDOFF.md](INTEGRATION_HANDOFF.md#status). The exit tests marked **new** below have not been run by us under the current RB-toggle design.
 
 ## Terms
 
@@ -32,7 +32,7 @@ cd Nepi_Connect/pi && python3 -B -m unittest -v test_nepi_link
 cd ../tools && python3 -B -m unittest -v test_rbx_nepi_connect
 ```
 
-*Pass:* both end in `OK`, with the counts in [README.md](README.md#status).
+*Pass:* both end in `OK`, with the counts in [INTEGRATION_HANDOFF.md](INTEGRATION_HANDOFF.md#status).
 
 **1.2 Your vehicle file.** Load the file through the same loader and validator nepi_link runs at start:
 

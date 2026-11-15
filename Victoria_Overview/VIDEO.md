@@ -14,7 +14,7 @@
 
 ## Your Method: The Relay Through NEPI
 
-As your committed scripts implement it (`nepi_disp.sh`, [live_udp_stabilization.py](../Apps/nepi_app_robot_stab/scripts/live_udp_stabilization.py), [Apps/nepi_app_robot_stab/README.md](../Apps/nepi_app_robot_stab/README.md)):
+As your scripts implemented it at commit `d370aca` (`nepi_disp.sh`, [live_udp_stabilization.py](https://github.com/nepi-engine/mate_robotics/blob/d370aca75cc7b75ee590ab72653a7f4b3dd9cc1e/Apps/nepi_app_robot_stab/scripts/live_udp_stabilization.py), [Apps/nepi_app_robot_stab/README.md](https://github.com/nepi-engine/mate_robotics/blob/d370aca75cc7b75ee590ab72653a7f4b3dd9cc1e/Apps/nepi_app_robot_stab/README.md)). Your next commit, `aff0f84`, removed `Apps/nepi_app_robot_stab`. Your optical flow app, [Apps/nepi_app_optical_flow](../Apps/nepi_app_optical_flow/), reads a NEPI camera instead, which the `idx_net_stream` driver in "Our Method" provides. `nepi_disp.sh` still expects the removed scripts.
 
 ```
  ROV PI 192.168.68.22                NEPI 192.168.68.103                       TOPSIDE 192.168.68.12

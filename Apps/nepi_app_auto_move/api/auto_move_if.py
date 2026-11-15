@@ -85,6 +85,13 @@ IMAGE_CONNECT_NAME = 'image_connect'
 # ControlsIF owns and the Nepi_IF_Controls box in this app's RUI column binds to.
 CONTROLS_NAME = 'controls'
 
+# Controls name of the stabilization control set (Method and Enable): the
+# <app>/stab_controls namespace a second ControlsIF owns and the Stabilization
+# box in this app's RUI binds to. Checked against every leaf this class mounts
+# under <app> -- status, the command topics, controls, rbx_connect and
+# image_connect -- so it lands on no sibling's namespace.
+STAB_CONTROLS_NAME = 'stab_controls'
+
 # Sibling data product names. A NEPI image source publishes its data products
 # flat under one parent namespace, so the depth map for <P>/color_image is
 # <P>/depth_map. The colourized render of a depth map is nested one level
@@ -204,6 +211,13 @@ GOTO_STEP_TIMEOUT_SEC = 60
 # period, which would otherwise read as "never started".
 GOTO_BUSY_WAIT_SEC = 3
 
+# Stabilization loop period. Each cycle reads the live Enable and Method values
+# and, while Enable is on, runs the selected method once.
+STAB_PROCESS_INTERVAL_SEC = 0.1
+
+# stab_msg while the app was constructed without a stabilization script.
+STAB_UNAVAILABLE_MSG = 'Stabilization unavailable: this app was started without a stabilization script'
+
 
 class AutoMoveIF:
 
@@ -214,6 +228,7 @@ class AutoMoveIF:
 
     node_if = None
     controls_if = None
+    stab_controls_if = None
     rbx_if = None
     image_if = None
 
@@ -317,6 +332,23 @@ class AutoMoveIF:
     goto_step_issued = False
     goto_saw_busy = False
 
+    # Stabilization. has_stab is True only when the host handed in both a
+    # stabilization control dict and a runner. The four reported fields are
+    # written together by updateStab() and read together by publish_status(),
+    # both under stab_lock, so a published status never pairs a stab_enabled
+    # with a stab_state decided from a different read. The controls callback
+    # and the stabilization timer run on different threads; the lock is what
+    # keeps their transitions from interleaving.
+    has_stab = False
+    stab_enabled = False
+    stab_method = ''
+    stab_state = NepiAppAutoMoveStatus.STAB_STATE_OFF
+    stab_msg = 'Stabilization off'
+    stab_cycle_count = 0
+    stab_run_start_time = 0
+    stab_last_cycle_time = 0
+    stab_lock = threading.Lock()
+
     # One param dict for every overlay view control. initCb copies key by key, so
     # adding a key here is safe against a saved config written before it existed.
     image_controls_dict = dict(
@@ -357,6 +389,8 @@ class AutoMoveIF:
                 planMoveFunction,
                 planVelocityMoveFunction = None,
                 enable_image_pub = True,
+                stab_controls_dict = None,
+                runStabMethodFunction = None,
                 msg_if = None
                 ):
         ####  IF INIT SETUP ####
@@ -390,6 +424,14 @@ class AutoMoveIF:
         # refuses a velocity goto on capability anyway, and runPlanning refuses
         # one with no planner.
         self.planVelocityMove = planVelocityMoveFunction
+        # Stabilization is likewise optional. With either argument None no
+        # stabilization control set is built, no stabilization timer runs, and
+        # the status reports stabilization as unavailable; everything else
+        # behaves exactly as without it.
+        self.runStabMethod = runStabMethodFunction
+        self.has_stab = (stab_controls_dict is not None and runStabMethodFunction is not None)
+        if self.has_stab == False:
+            self.stab_msg = STAB_UNAVAILABLE_MSG
 
         ##############################
         # Get System Folders
@@ -695,6 +737,23 @@ class AutoMoveIF:
                         msg_if = self.msg_if)
         self.controls_if.wait_for_ready()
 
+        # Setup Stabilization Controls IF, built the same way as the controls IF
+        # above. controls_updated_callback runs the stabilization update on
+        # every operator change, so a status published right after shows the
+        # new state. It is NOT called for values ControlsIF changes on init,
+        # reset or factory reset; the stabilization timer reads the live values
+        # every cycle and catches those.
+        if self.has_stab == True:
+            self.stab_controls_dict = copy.deepcopy(stab_controls_dict)
+            self.stab_controls_if = ControlsIF(
+                            controls_name = STAB_CONTROLS_NAME,
+                            controls_display_name = 'Stabilization',
+                            controls_description = 'Runs the selected stabilization method while Enable is on',
+                            controls_init_dict = self.stab_controls_dict,
+                            controls_updated_callback = self.stabControlsUpdatedCb,
+                            msg_if = self.msg_if)
+            self.stab_controls_if.wait_for_ready()
+
         ###############################
         # Create Connect IFs
         self.setupConnectIFs()
@@ -710,6 +769,8 @@ class AutoMoveIF:
         nepi_sdk.start_timer_process((1.0), self.publishStatusCb)
         nepi_sdk.start_timer_process((1.0), self.updaterCb, oneshot = True)
         nepi_sdk.start_timer_process((0.2), self.gotoProcessCb, oneshot = True)
+        if self.stab_controls_if is not None:
+            nepi_sdk.start_timer_process((STAB_PROCESS_INTERVAL_SEC), self.stabProcessCb, oneshot = True)
 
         self.ready = True
         ##########################
@@ -763,6 +824,21 @@ class AutoMoveIF:
             str: The ``<app>/controls`` namespace, fully qualified.
         """
         return nepi_sdk.get_full_namespace(nepi_sdk.create_namespace(self.namespace, CONTROLS_NAME))
+
+    def get_stab_controls_namespace(self):
+        """Return the fully-qualified namespace of this app's stabilization control set.
+
+        Built the same way as get_controls_namespace(), for the same
+        leading-slash reason.
+
+        Returns:
+            str: The ``<app>/stab_controls`` namespace, fully qualified, or ''
+                when this interface was constructed without stabilization and
+                so has no such set.
+        """
+        if self.has_stab == False:
+            return ''
+        return nepi_sdk.get_full_namespace(nepi_sdk.create_namespace(self.namespace, STAB_CONTROLS_NAME))
 
     def get_connect_namespace(self, connect_name):
         """Return the fully-qualified namespace of one of this app's connect IFs.
@@ -934,6 +1010,17 @@ class AutoMoveIF:
         status_msg.controls_namespace = self.get_controls_namespace()
         status_msg.controls_ready = False if self.controls_if is None else self.controls_if.get_ready_state()
 
+        status_msg.stab_controls_namespace = self.get_stab_controls_namespace()
+        status_msg.stab_controls_ready = False if self.stab_controls_if is None else self.stab_controls_if.get_ready_state()
+        # Read as one set under stab_lock so enabled, method, state and msg all
+        # come from the same stabilization update.
+        self.stab_lock.acquire()
+        status_msg.stab_enabled = self.stab_enabled
+        status_msg.stab_method = self.stab_method
+        status_msg.stab_state = self.stab_state
+        status_msg.stab_msg = self.stab_msg
+        self.stab_lock.release()
+
         self.status_msg = status_msg
 
         if self.node_if is not None:
@@ -1013,11 +1100,15 @@ class AutoMoveIF:
     def resetCb(self, do_updates = True):
         if self.controls_if is not None:
             self.controls_if.reset()
+        if self.stab_controls_if is not None:
+            self.stab_controls_if.reset()
         self.initCb(do_updates = do_updates)
 
     def factoryResetCb(self, do_updates = True):
         if self.controls_if is not None:
             self.controls_if.factory_reset()
+        if self.stab_controls_if is not None:
+            self.stab_controls_if.factory_reset()
         self.initCb(do_updates = do_updates)
 
     ##########################################
@@ -1998,6 +2089,120 @@ class AutoMoveIF:
             except Exception:
                 robot_dict['status_dict'] = None
         return robot_dict
+
+    ##########################################
+    # Stabilization
+    #
+    # A loop that runs the selected stabilization method while Enable is on. In
+    # this version its only effect is on stab_state and stab_msg: it sends no
+    # robot command, makes no command call on the RBX connect, and never reads
+    # or changes goto state.
+
+    def stabProcessCb(self, timer):
+        publish = False
+        try:
+            self.stab_lock.acquire()
+            try:
+                publish = self.updateStab(run_method = True)
+            finally:
+                self.stab_lock.release()
+        except Exception as e:
+            # The method's own failures are handled inside updateStab. This only
+            # catches the loop failing around it, and keeps the timer alive.
+            self.msg_if.pub_warn("Stabilization process failed: " + str(e), throttle_s = 5.0)
+        if publish == True:
+            self.publish_status()
+
+        nepi_sdk.start_timer_process((STAB_PROCESS_INTERVAL_SEC), self.stabProcessCb, oneshot = True)
+
+    def stabControlsUpdatedCb(self, control_name, update_value = None):
+        # Called by the stab ControlsIF with (control_name, update_value) after
+        # an operator change, before it saves its params. Runs the loop's own
+        # transitions but never the method, which stays on the timer thread,
+        # then publishes so the operator sees the new state at once.
+        try:
+            self.stab_lock.acquire()
+            try:
+                self.updateStab(run_method = False)
+            finally:
+                self.stab_lock.release()
+        except Exception as e:
+            self.msg_if.pub_warn("Stabilization update failed: " + str(e), throttle_s = 5.0)
+        self.publish_status()
+
+    def updateStab(self, run_method = False):
+        # The one stabilization update path, shared by stabProcessCb and
+        # stabControlsUpdatedCb. The caller holds stab_lock; this never calls
+        # publish_status, which takes the same lock. Returns True when the status
+        # should publish now rather than on the next 1 s publish.
+        #
+        # Reads the LIVE control values every time. ControlsIF changes values
+        # without calling the updated callback on init (saved params), reset(),
+        # factory_reset() and the reset_controls topic, so a value cached by the
+        # callback could be stale.
+        if self.stab_controls_if is None:
+            return False
+        enabled = (self.stab_controls_if.get_control_value('stab_enabled') == True)
+        method = self.stab_controls_if.get_control_value('stab_method')
+        if method is None:
+            method = ''
+        method = str(method)
+
+        publish = False
+        current_time = nepi_utils.get_time()
+        if enabled != self.stab_enabled:
+            if enabled == True:
+                self.msg_if.pub_info("Stabilization on: " + method)
+                self.stab_cycle_count = 0
+                self.stab_run_start_time = current_time
+                self.stab_last_cycle_time = current_time
+                self.stab_state = NepiAppAutoMoveStatus.STAB_STATE_RUNNING
+                self.stab_msg = 'Stabilization on: ' + method
+            else:
+                self.msg_if.pub_info("Stabilization off")
+                self.stab_state = NepiAppAutoMoveStatus.STAB_STATE_OFF
+                self.stab_msg = 'Stabilization off'
+            publish = True
+        elif enabled == True and method != self.stab_method:
+            self.msg_if.pub_info("Stabilization method changed: " + self.stab_method + " to " + method)
+            self.stab_cycle_count = 0
+            self.stab_run_start_time = current_time
+            self.stab_last_cycle_time = current_time
+            self.stab_state = NepiAppAutoMoveStatus.STAB_STATE_RUNNING
+            self.stab_msg = 'Stabilization method changed to: ' + method
+            publish = True
+        self.stab_enabled = enabled
+        self.stab_method = method
+
+        if enabled == True and run_method == True:
+            dt_s = 0.0
+            if self.stab_cycle_count > 0:
+                dt_s = float(current_time - self.stab_last_cycle_time)
+            stab_dict = {
+                'method': method,
+                'cycle_count': int(self.stab_cycle_count),
+                'run_time_s': float(current_time - self.stab_run_start_time),
+                'dt_s': dt_s,
+            }
+            try:
+                result = self.runStabMethod(method,
+                                            stab_dict,
+                                            self.getRobotDict(),
+                                            copy.deepcopy(self.stab_controls_if.get_controls_dict()))
+                self.stab_msg = str(result['msg'])
+                if self.stab_state == NepiAppAutoMoveStatus.STAB_STATE_ERROR:
+                    publish = True
+                self.stab_state = NepiAppAutoMoveStatus.STAB_STATE_RUNNING
+            except Exception as e:
+                # Enable is left as it is; the next cycle retries.
+                self.msg_if.pub_warn("Stabilization method failed: " + str(e), throttle_s = 5.0)
+                if self.stab_state != NepiAppAutoMoveStatus.STAB_STATE_ERROR:
+                    publish = True
+                self.stab_state = NepiAppAutoMoveStatus.STAB_STATE_ERROR
+                self.stab_msg = 'Stabilization method failed: ' + str(e)
+            self.stab_cycle_count = self.stab_cycle_count + 1
+            self.stab_last_cycle_time = current_time
+        return publish
 
     ##########################################
     # Status

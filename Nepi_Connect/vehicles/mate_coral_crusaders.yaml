@@ -6,7 +6,7 @@
 # this file is its worked example.
 #
 # On the Pi, copy this file beside nepi_link.py and name it
-# nepi_connect_vehicle.yaml (Handoff/PI_INTEGRATION.md). An empty nepi_ip
+# nepi_connect_vehicle.yaml (Victoria_Overview/PI_INTEGRATION.md). An empty nepi_ip
 # turns the link off. PyYAML must be installed: sudo apt install python3-yaml
 #
 # Code references point to the team's repository (github.com/CoralCrusaders/
@@ -91,12 +91,12 @@ control:
   # The caps below keep surge at or under 0.2 and yaw at or under 0.1.
   axes:
     surge: {kind: stick, input: ABS_Y, sign: -1, cap: 0.2}   # measured with rov-26 code and a stock Xbox pad: LY pushed forward reads negative
-    sway:  {kind: stick, input: ABS_X, sign: 1, cap: 0.2}    # measure: Handoff/TEST_PLAN.md "Measuring the Signs and the IMU Mount"
+    sway:  {kind: stick, input: ABS_X, sign: 1, cap: 0.2}    # measure: Victoria_Overview/TEST_PLAN.md "Measuring the Signs and the IMU Mount"
     heave: {kind: stick, input: ABS_RY, sign: 1, cap: 0.2}   # heave is positive down; measure as for sway
-    yaw:   {kind: trigger_pair, inputs: [ABS_Z, ABS_RZ], sign: 1, cap: 0.1}   # set cap 0 until you have checked finding 1 in Handoff/SAFETY.md
+    yaw:   {kind: trigger_pair, inputs: [ABS_Z, ABS_RZ], sign: 1, cap: 0.1}   # set cap 0 until you have checked finding 1 in Victoria_Overview/SAFETY.md
 
   # No NEPI servos: you said NEPI does not need to move the claw
-  # (Handoff/NEPI_SETUP.md "Optional Servos").
+  # (Victoria_Overview/NEPI_SETUP.md "Optional Servos").
   #
   # The claw servos are Axon MAX MK2s (Docs/svx/axon_max_mk2_servo.md). Which
   # inputs move them, and how, is still open (BENCH_SETUP_PLAN V14). An Axon
@@ -166,12 +166,12 @@ telemetry:
         depth_rate_target_m_s, depth_pwr_out, yaw_rate_target_deg_s, yaw_pwr_out]
   # Where the IMU board's X and Y arrows point in the ROV. NEPI starts its
   # imu_mount setting here; the board lies on its side in your ROV
-  # (2026-10-26), so measure it (Handoff/TEST_PLAN.md "Measuring the Signs
+  # (2026-10-26), so measure it (Victoria_Overview/TEST_PLAN.md "Measuring the Signs
   # and the IMU Mount") and set it here or on NEPI. X_FORWARD_Y_LEFT is a flat
   # board, which passes the values through unchanged.
   imu_mount: X_FORWARD_Y_LEFT
 
-# Your video reaches NEPI through FastMJPG (Handoff/VIDEO.md), which your own
+# Your video reaches NEPI through FastMJPG (Victoria_Overview/VIDEO.md), which your own
 # commands send, so nothing is announced here. To have NEPI list a FastMJPG
 # camera on its link_status, add one entry per NEPI port, for example:
 #   - {name: cam0, transport: fastmjpg, port: 5610}

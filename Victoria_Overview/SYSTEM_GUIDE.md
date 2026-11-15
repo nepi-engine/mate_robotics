@@ -37,7 +37,7 @@ Citations of your code look like `rov-26 rpi/modes/main.py:101` and point to git
 | NEPI | 192.168.68.103 | NEPI, the `rbx_nepi_connect` driver, optionally the `idx_net_stream` camera driver | UDP 5700 for the vehicle message and status (the driver's `status_port`); the RUI in a browser; video ports per [VIDEO.md](VIDEO.md) |
 | Teensy 4.1 | USB `/dev/ttyACM0` on the ROV Pi | Your sketch | Serial, 115200 (`rov-26 rpi/modes/main.py:13, 23`) |
 
-The ROV Pi and topside addresses are the ones in `rov-26 config.yaml:1-2` and in your scripts. The NEPI address is the one your own scripts use (`Apps/nepi_app_robot_stab/README.md`). Both link ports are free in rov-26: nothing there uses 5700 or 5701.
+The ROV Pi and topside addresses are the ones in `rov-26 config.yaml:1-2` and in your scripts. The NEPI address is the one your own scripts use (192.168.68.103 in `nepi_disp.sh`). Both link ports are free in rov-26: nothing there uses 5700 or 5701.
 
 The addresses must match in two places. On the ROV Pi, `network.nepi_ip` in the vehicle file names NEPI, and nepi_link accepts demands only from that address. On NEPI, the driver's `host` option names the ROV Pi, and the driver accepts vehicle and status messages only from that address and sends demands only to it. [PI_INTEGRATION.md](PI_INTEGRATION.md) covers the first, [NEPI_SETUP.md](NEPI_SETUP.md) the second.
 

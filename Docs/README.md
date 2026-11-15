@@ -8,8 +8,8 @@ This folder holds one hardware reference per part in the MATE standard hardware 
 |---|---|---|---|---|
 | PJRC Teensy 4.1 microcontroller | tbd | [pjrc_teensy_4_1.md](tbd/pjrc_teensy_4_1.md) | USB serial (CDC-ACM) to the host; generates PWM, hosts I2C | Needs pin map and the host-to-Teensy protocol |
 | Raspberry Pi 5 | tbd | [raspberry_pi_5.md](tbd/raspberry_pi_5.md) | Host computer: USB, I2C, UART, 4 hardware PWM channels | Needs bus and overlay plan |
-| Blue Robotics T200 thruster (R2) | tbd | [bluerobotics_t200_thruster.md](tbd/bluerobotics_t200_thruster.md) | None; three motor phases driven by an ESC | Needs thruster count, layout and supply voltage |
-| Blue Robotics Basic ESC (BESC30-R3) | tbd | [bluerobotics_basic_esc.md](tbd/bluerobotics_basic_esc.md) | One-way servo PWM, 1100 to 1900 µs | Needs pulse source and watchdog design; signal-loss timeout unmeasured |
+| Blue Robotics T200 thruster (R2) | Motors | [bluerobotics_t200_thruster.md](Motors/bluerobotics_t200_thruster.md) | None; three motor phases driven by an ESC | Needs thruster count, layout and supply voltage |
+| Blue Robotics Basic ESC (BESC30-R3) | Motors | [bluerobotics_basic_esc.md](Motors/bluerobotics_basic_esc.md) | One-way servo PWM, 1100 to 1900 µs | Needs pulse source and watchdog design; signal-loss timeout unmeasured |
 | Axon Robotics Axon MAX MK2 servo | svx | [axon_max_mk2_servo.md](svx/axon_max_mk2_servo.md) | Servo PWM, 500 to 2500 µs, plus an analog position output | Needs settings read from the unit, and its job on the vehicle |
 | DeepWater Exploration exploreHD (400 m) | idx | [dwe_explorehd_camera.md](idx/dwe_explorehd_camera.md) | USB 2.0 UVC (H.264, MJPEG, YUY2) | Needs `v4l2-ctl` and `lsusb` capture from a real unit; serial uniqueness unconfirmed |
 | Adafruit BNO085 IMU (4754) | npx | [adafruit_bno085_imu.md](npx/adafruit_bno085_imu.md) | I2C, UART, UART-RVC or SPI | Needs interface choice and an I2C reliability test on the host |
@@ -26,7 +26,7 @@ What each part is driven by, as confirmed in the part documents:
 
 - **Pulse-driven parts with no data link of their own.**
   - The T200 thrusters have only motor phases and are driven by Basic ESCs.
-  - Each ESC takes one-way servo pulses from 1100 to 1900 µs, at up to 400 Hz, and reports nothing back. See [the ESC document](tbd/bluerobotics_basic_esc.md).
+  - Each ESC takes one-way servo pulses from 1100 to 1900 µs, at up to 400 Hz, and reports nothing back. See [the ESC document](Motors/bluerobotics_basic_esc.md).
   - The Axon servo also takes servo pulses (500 to 2500 µs), but it has a fourth wire carrying an analog position output. See [the servo document](svx/axon_max_mk2_servo.md).
   - None of these can be detected by software; their presence comes from configuration.
 - **I2C sensors.**

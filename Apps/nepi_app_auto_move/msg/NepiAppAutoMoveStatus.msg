@@ -11,6 +11,11 @@ string GOTO_STATE_MOVING=moving
 string GOTO_STATE_COMPLETE=complete
 string GOTO_STATE_CANCELLED=cancelled
 
+# Stabilization loop states. The app reports exactly one of these in stab_state.
+string STAB_STATE_OFF=off
+string STAB_STATE_RUNNING=running
+string STAB_STATE_ERROR=error
+
 #################
 # Selected robot
 #################
@@ -208,3 +213,29 @@ int32 goto_step_count
 string controls_namespace
 # True once that ControlsIF has completed initialization
 bool controls_ready
+
+#################
+# Stabilization
+#################
+# A second control set, Method and Enable, with a loop that runs the selected
+# method while Enable is on. Per-control data travels in the ControlsStatus
+# message that set's own ControlsIF publishes at <stab_controls_namespace>/status,
+# exactly as for the app controls above.
+#
+# FULLY QUALIFIED, for the same rosbridge reason as rbx_connect_namespace above.
+# Empty when the app was started without a stabilization script: there is then
+# no set, and stab_msg says so.
+string stab_controls_namespace
+# True once that ControlsIF has completed initialization
+bool stab_controls_ready
+# The live Enable and Method control values, as the stabilization loop last read
+# them. The loop reads them every 0.1 s and on every control change, so they are
+# at most one cycle old, and they are always the values stab_state was decided
+# from. stab_method is empty when there is no set.
+bool stab_enabled
+string stab_method
+# One of the STAB_STATE_* constants above
+string stab_state
+# Human readable account of what stabilization is doing: the running method's
+# own message, or why stabilization is off, failed or unavailable
+string stab_msg

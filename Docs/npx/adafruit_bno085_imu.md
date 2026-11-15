@@ -331,7 +331,7 @@ CEVA adds: "In practice the rotation vector is typically accurate to 5˚ and the
 
 - [Raspberry Pi 5](../tbd/raspberry_pi_5.md): a possible I2C or UART host; its RP1 I2C controller's clock-stretching behavior is unverified.
 - [PJRC Teensy 4.1](../tbd/pjrc_teensy_4_1.md): a possible host on one of its I2C ports or a hardware UART, which would avoid the Pi I2C issue.
-- [Blue Robotics T200 thruster](../tbd/bluerobotics_t200_thruster.md): its magnets and motor currents may disturb magnetic heading [4][24].
+- [Blue Robotics T200 thruster](../Motors/bluerobotics_t200_thruster.md): its magnets and motor currents may disturb magnetic heading [4][24].
 - [Blue Robotics Bar depth sensor](bluerobotics_bar_depth_sensor.md): may share an I2C bus; if a multiplexer is used (see that document), keep the BNO085 off it [3].
 - [Adafruit MS8607 PHT sensor](../tbd/adafruit_ms8607_pht_sensor.md): same multiplexer note as the Bar sensor.
 

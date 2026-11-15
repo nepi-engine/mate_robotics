@@ -115,6 +115,7 @@ class NepiAppAutoMove extends Component {
     this.getAppNamespace = this.getAppNamespace.bind(this)
     this.getConnectNamespace = this.getConnectNamespace.bind(this)
     this.getControlsNamespace = this.getControlsNamespace.bind(this)
+    this.getStabControlsNamespace = this.getStabControlsNamespace.bind(this)
 
     this.statusListener = this.statusListener.bind(this)
     this.updateStatusListener = this.updateStatusListener.bind(this)
@@ -127,6 +128,7 @@ class NepiAppAutoMove extends Component {
     this.renderControls = this.renderControls.bind(this)
     this.renderGoto = this.renderGoto.bind(this)
     this.renderAppControls = this.renderAppControls.bind(this)
+    this.renderStabControls = this.renderStabControls.bind(this)
     this.renderConfig = this.renderConfig.bind(this)
     this.renderImageViewer = this.renderImageViewer.bind(this)
   }
@@ -176,6 +178,20 @@ class NepiAppAutoMove extends Component {
     }
     const appNamespace = this.getAppNamespace()
     return (appNamespace != null) ? appNamespace + "/controls" : null
+  }
+
+  // Namespace of this app's stabilization ControlsIF, taken from the status
+  // message for the same reason as getControlsNamespace(). The node reports ''
+  // when it was started without a stabilization script, and this then returns
+  // null so the controls are not mounted on a namespace nothing publishes on.
+  // The app namespace join is the fallback only until the first status arrives.
+  getStabControlsNamespace() {
+    const status_msg = this.state.status_msg
+    if (status_msg != null && status_msg.stab_controls_namespace != null) {
+      return (status_msg.stab_controls_namespace !== '') ? status_msg.stab_controls_namespace : null
+    }
+    const appNamespace = this.getAppNamespace()
+    return (appNamespace != null) ? appNamespace + "/stab_controls" : null
   }
 
   statusListener(message) {
@@ -641,7 +657,9 @@ class NepiAppAutoMove extends Component {
   }
 
   // The app's own control set, rendered by the shared Nepi_IF_Controls against
-  // the fully-qualified namespace the status message reports.
+  // the fully-qualified namespace the status message reports. Keyed by that
+  // namespace so a change (the join fallback giving way to the status value)
+  // remounts the box instead of leaving it on its old subscription.
   renderAppControls() {
     const controls_namespace = this.getControlsNamespace()
     if (controls_namespace == null) {
@@ -651,9 +669,46 @@ class NepiAppAutoMove extends Component {
       <Section title={"Move Controls"}>
 
         <NepiIFControls
+          key={controls_namespace}
           namespace={controls_namespace}
           make_section={false}
         />
+
+      </Section>
+    )
+  }
+
+  // The stabilization control set, Method and Enable, rendered by the shared
+  // Nepi_IF_Controls the same way as the Move Controls box above, with a
+  // read-only readout of what the loop is doing underneath. When the node
+  // reports no stabilization set the controls are hidden and the readout says
+  // why.
+  renderStabControls() {
+    const status_msg = this.state.status_msg
+    const stab_controls_namespace = this.getStabControlsNamespace()
+    if (stab_controls_namespace == null && status_msg == null) {
+      return null
+    }
+    const stab_enabled = (status_msg != null && status_msg.stab_enabled === true)
+
+    return (
+      <Section title={"Stabilization"}>
+
+        {(stab_controls_namespace != null) ?
+          <NepiIFControls
+            key={stab_controls_namespace}
+            namespace={stab_controls_namespace}
+            make_section={false}
+          />
+        : null}
+
+        {(status_msg != null) ?
+          <pre style={{ height: "80px", overflowY: "auto" }} align={"left"} textAlign={"left"}>
+          {"State: " + status_msg.stab_state +
+           ((stab_enabled === true) ? "  (" + status_msg.stab_method + ")" : "") +
+           "\n" + status_msg.stab_msg}
+          </pre>
+        : null}
 
       </Section>
     )
@@ -727,6 +782,7 @@ class NepiAppAutoMove extends Component {
           {this.renderControls()}
           {this.renderGoto()}
           {this.renderAppControls()}
+          {this.renderStabControls()}
           {this.renderConfig()}
         </div>
 

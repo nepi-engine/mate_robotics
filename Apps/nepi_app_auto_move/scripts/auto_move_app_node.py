@@ -20,6 +20,7 @@ import copy
 
 from nepi_sdk import nepi_sdk
 from nepi_sdk import nepi_auto_move
+from nepi_sdk import nepi_auto_move_stab
 
 from nepi_api.messages_if import MsgIF
 from nepi_api.auto_move_if import AutoMoveIF
@@ -61,12 +62,21 @@ class NepiAutoMoveApp(object):
         # goto. The node never reads control values itself.
         controls_dict = copy.deepcopy(nepi_auto_move.MOVE_CONTROLS_DICT)
 
+        # stab_controls_dict is the stabilization script's control DEFINITION
+        # dict (Method and Enable). AutoMoveIF builds a second ControlsIF from it
+        # and calls runStabMethod once per stabilization cycle while Enable is
+        # on. Both are optional: leave either out and the app runs exactly as
+        # before, with stabilization reported as unavailable.
+        stab_controls_dict = copy.deepcopy(nepi_auto_move_stab.STAB_CONTROLS_DICT)
+
         self.auto_move_if = AutoMoveIF(
                             namespace = self.node_namespace,
                             description = self.APP_DESCRIPTION,
                             controls_dict = controls_dict,
                             planMoveFunction = self.planMove,
                             planVelocityMoveFunction = self.planVelocityMove,
+                            stab_controls_dict = stab_controls_dict,
+                            runStabMethodFunction = self.runStabMethod,
                             msg_if = self.msg_if
                             )
 
@@ -101,6 +111,12 @@ class NepiAutoMoveApp(object):
                                                  robot_dict,
                                                  controls_dict,
                                                  obstacles_list)
+
+    def runStabMethod(self, method_name, stab_dict, robot_dict, controls_dict):
+        # Called by AutoMoveIF once per stabilization cycle while Enable is on.
+        # Thin pass-through to the SDK module, same shape as planMove, so the
+        # methods ship in nepi_sdk and any other node can run them.
+        return nepi_auto_move_stab.run_stab_method(method_name, stab_dict, robot_dict, controls_dict)
 
 
 #########################################

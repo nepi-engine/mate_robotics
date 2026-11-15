@@ -195,7 +195,7 @@ There is no manufacturer driver library. Any code that can produce standard serv
 
 - [PJRC Teensy 4.1](../tbd/pjrc_teensy_4_1.md): the likely source of this servo's PWM pulses. The servo's 500 to 2500 µs range and frame rate may differ from the ESCs', which matters if they share a timer.
 - [Raspberry Pi 5](../tbd/raspberry_pi_5.md): could drive this servo from one of its hardware PWM channels instead, if the wiring puts it there.
-- [Blue Robotics Basic ESC](../tbd/bluerobotics_basic_esc.md): also takes servo pulses, but over a different range (see that document), so the two channel types need separate limits in the driver.
+- [Blue Robotics Basic ESC](../Motors/bluerobotics_basic_esc.md): also takes servo pulses, but over a different range (see that document), so the two channel types need separate limits in the driver.
 
 ## Open Questions
 

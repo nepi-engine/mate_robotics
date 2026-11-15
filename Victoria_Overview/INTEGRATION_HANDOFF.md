@@ -1,6 +1,6 @@
 # NEPI Integration Handoff for the Coral Crusaders ROV
 
-2026-11-02, from the NEPI team, for Victoria Zhang and the Coral Crusaders. Updated 2026-11-11: the link is now NEPI Connect, link protocol version 2, and your settings live in a vehicle file.
+2026-11-02, from the NEPI team, for Victoria Zhang and the Coral Crusaders. Updated 2026-11-11: the link is now NEPI Connect, link protocol version 2, and your settings live in a vehicle file. Moved on 2026-11-14 from `Handoff/README.md` into `Victoria_Overview/`, whose [README.md](README.md) is now the place to start.
 
 ## What This Is
 
@@ -57,7 +57,7 @@ Every file you need from this repo. Paths are links, so they open on GitHub (nep
 | [Nepi_Connect/LINK_PROTOCOL.md](../Nepi_Connect/LINK_PROTOCOL.md) | None | The wire contract, version 2: the vehicle, status and demand messages, and video to NEPI. It matches the code. | Reference |
 | [Nepi_Connect/DRIVER_HANDOFF.md](../Nepi_Connect/DRIVER_HANDOFF.md) | None | The telemetry targets, and firmware suggestions for you in "Problems to fix" rows 1, 2 and 6 | Reference |
 
-Other folders in this repo are not part of your setup. `Apps/nepi_app_robot_stab/scripts/` and `nepi_disp.sh` are yours.
+Other folders in this repo are not part of your link setup. `Apps/nepi_app_optical_flow/` and `nepi_disp.sh` are yours. Stabilization, which changes `Apps/nepi_app_optical_flow/` and `Apps/nepi_app_auto_move/`, has its own plan: [OPTICAL_FLOW_STAB_PLAN.md](OPTICAL_FLOW_STAB_PLAN.md).
 
 ## Status
 
@@ -69,7 +69,7 @@ As of 2026-11-02. "Our bench" is our replica of your system: rov-26 code, a real
 | rbx_nepi_connect driver | Yes | 60 unit tests, all pass, run against the real nepi_link and nepi_connect (46 before version 2). Under NEPI: depth from a Bar02 reached the RUI NavPose panel. RUI Teleop W/S, Q/E and A/D drove the thruster during NEPI control. | The Set State PILOT exit. Orientation and `imu_mount` with a real BNO085. Anything in water. |
 | Optional servos | Yes | A servo moved from the RUI during NEPI control, using our own throwaway bench sketch, not your claw code | Servo return to neutral on handback |
 | idx_net_stream, `fastmjpg://` mode | Yes | Worked under NEPI with one camera, 2026-10-19. On a simulated link with 3% loss, 1 send round delivered 12 of 60 frames and 2 rounds 58 of 60. | Your four cameras and your tether |
-| A stabilization (hold) process | No | None | None. Your `optical_flow.py` gives camera displacement in pixels, and [NEPI_SETUP.md](NEPI_SETUP.md#topics-your-own-code-would-use) names the command topic a hold loop would publish. |
+| Stabilization in auto_move (row updated 2026-11-14) | The foundation only, written but not yet run on a NEPI: a Stabilization section with Method and Enable, and a loop every 0.1 s. Its one method, Optical Flow, commands nothing yet. | None | All of it. [OPTICAL_FLOW_STAB_PLAN.md](OPTICAL_FLOW_STAB_PLAN.md) is the build plan, and [README.md](README.md) says where it stands. |
 | Your current code | None | We have not seen it | Every assumption in [PI_INTEGRATION.md](PI_INTEGRATION.md#what-nepi_link-assumes-about-your-code) |
 
 The unit-test counts are from `python3 -B -m unittest -v test_nepi_link` in `Nepi_Connect/pi` and `python3 -B -m unittest -v test_rbx_nepi_connect` in `Nepi_Connect/tools`, run on 2026-11-11 after the move to protocol version 2. The bench and NEPI results in this table are from the version 1 code of 2026-11-02; the behavior they test did not change.
