@@ -60,9 +60,11 @@ class OpticalFlowApp extends Component {
   constructor(props) {
     super(props)
     this.state = {telemetry: {}, samples: [], k1Draft: null,
+      maskDraft: null, maskPending: null, maskMessage: "",
       pid: {p: "0", i: "0", d: "0"}}
     this.listener = null
     this.k1Timer = null
+    this.maskSaveTimer = null
   }
 
   baseNamespace() {
@@ -77,19 +79,29 @@ class OpticalFlowApp extends Component {
   componentWillUnmount() {
     if (this.listener) this.listener.unsubscribe()
     if (this.k1Timer) clearTimeout(this.k1Timer)
+    if (this.maskSaveTimer) clearTimeout(this.maskSaveTimer)
   }
 
   subscribe() {
     const namespace = this.baseNamespace()
     if (this.listener) this.listener.unsubscribe()
     if (this.k1Timer) clearTimeout(this.k1Timer)
+    if (this.maskSaveTimer) clearTimeout(this.maskSaveTimer)
     this.listener = null
     this.k1Timer = null
+    this.maskSaveTimer = null
     this.subscribedNamespace = namespace
+    this.setState({maskDraft: null, maskPending: null, maskMessage: ""})
     if (namespace) this.listener = this.props.ros.setupStatusListener(
       `${namespace}/telemetry`, "std_msgs/String", message => {
         let telemetry
         try { telemetry = JSON.parse(message.data) } catch (_) { return }
+        const maskConfirmed = this.state.maskPending &&
+          JSON.stringify(telemetry.mask_polygon) === JSON.stringify(this.state.maskPending)
+        if (maskConfirmed && this.maskSaveTimer) {
+          clearTimeout(this.maskSaveTimer)
+          this.maskSaveTimer = null
+        }
         this.setState(previous => {
           let samples = telemetry.status === "Tracking" ? previous.samples : []
           if (typeof telemetry.t === "number" && typeof telemetry.x === "number" &&
@@ -101,6 +113,8 @@ class OpticalFlowApp extends Component {
             }
           }
           return {telemetry, samples,
+            maskPending: maskConfirmed ? null : previous.maskPending,
+            maskMessage: maskConfirmed ? "Polygon saved for this mask toggle." : previous.maskMessage,
             k1Draft: previous.k1Draft !== null &&
               Math.abs(previous.k1Draft - telemetry.k1) < 0.005 ? null : previous.k1Draft}
         })
@@ -118,13 +132,52 @@ class OpticalFlowApp extends Component {
     }, 150)
   }
 
+  addMaskPoint(event) {
+    if (this.state.maskDraft === null) return
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const x = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width))
+    const y = Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height))
+    this.setState(previous => ({
+      maskDraft: [...previous.maskDraft, [Number(x.toFixed(4)), Number(y.toFixed(4))]],
+      maskMessage: ""
+    }))
+  }
+
+  saveMask() {
+    const polygon = this.state.maskDraft
+    const namespace = this.baseNamespace()
+    if (!namespace || !polygon || polygon.length < 3) {
+      this.setState({maskMessage: "Click at least three points before saving."})
+      return
+    }
+    const twiceArea = Math.abs(polygon.reduce((sum, [x, y], index) => {
+      const [nextX, nextY] = polygon[(index + 1) % polygon.length]
+      return sum + x * nextY - nextX * y
+    }, 0))
+    if (twiceArea < 0.0002) {
+      this.setState({maskMessage: "The polygon needs a larger enclosed area."})
+      return
+    }
+    this.props.ros.sendStringMsg(`${namespace}/set_mask_polygon`, JSON.stringify(polygon))
+    if (this.maskSaveTimer) clearTimeout(this.maskSaveTimer)
+    this.maskSaveTimer = setTimeout(() => {
+      this.maskSaveTimer = null
+      this.setState(previous => previous.maskPending ?
+        {maskPending: null, maskMessage: "The app did not confirm the new polygon."} : null)
+    }, 3000)
+    this.setState({maskDraft: null, maskPending: polygon, maskMessage: "Applying polygon..."})
+  }
+
   render() {
-    const {telemetry, samples, pid, k1Draft} = this.state
+    const {telemetry, samples, pid, k1Draft, maskDraft, maskPending, maskMessage} = this.state
     const namespace = this.baseNamespace()
     const cameras = telemetry.available_topics || (this.props.ros.imageTopics || [])
     const streamUrl = namespace ? `http://${window.location.hostname}:9091/stream?topic=${namespace}/annotated_image&type=mjpeg&quality=75` : ""
     const k1 = k1Draft !== null ? k1Draft :
       (typeof telemetry.k1 === "number" ? telemetry.k1 : -0.21)
+    const maskEditing = maskDraft !== null
+    const polygon = maskEditing ? maskDraft : (maskPending || telemetry.mask_polygon || [])
+    const polygonPoints = polygon.map(([x, y]) => `${x * 1000},${y * 1000}`).join(" ")
     return <div style={{color: colors.white}}>
       <div style={{display: "grid", gridTemplateColumns: "minmax(0, 1.45fr) minmax(0, 1fr) minmax(240px, .8fr)",
         gap: Styles.vars.spacing.regular, alignItems: "start"}}>
@@ -152,14 +205,67 @@ class OpticalFlowApp extends Component {
           </Label>
         </Section>
 
-        <Section title="Displacement">
-          <DisplacementPlot samples={samples} fieldName="x" color={colors.blue} />
-          <div style={{height: Styles.vars.spacing.regular}} />
-          <DisplacementPlot samples={samples} fieldName="y" color={colors.orange} />
-          <div style={{...muted, marginTop: Styles.vars.spacing.small}}>
-            Camera axes; relative to the current reference
-          </div>
-        </Section>
+        <div>
+          <Section title="Displacement">
+            <DisplacementPlot samples={samples} fieldName="x" color={colors.blue} />
+            <div style={{height: Styles.vars.spacing.regular}} />
+            <DisplacementPlot samples={samples} fieldName="y" color={colors.orange} />
+            <div style={{...muted, marginTop: Styles.vars.spacing.small}}>
+              Camera axes; relative to the current reference
+            </div>
+          </Section>
+
+          <Section title="ROV feature mask">
+            <div style={{...muted, marginBottom: Styles.vars.spacing.small}}>
+              Red is ignored for tracking when the mask is on.
+            </div>
+            <div style={{position: "relative", backgroundColor: colors.default_dark,
+              border: `1px solid ${colors.grey1}`, minHeight: 120}}>
+              {namespace && <img src={streamUrl} alt="Live camera for drawing the feature mask"
+                style={{width: "100%", display: "block"}} />}
+              {namespace && <svg viewBox="0 0 1000 1000" preserveAspectRatio="none"
+                role="img" aria-label="Feature mask polygon editor"
+                onClick={event => this.addMaskPoint(event)}
+                style={{position: "absolute", top: 0, left: 0, width: "100%", height: "100%",
+                  cursor: maskEditing ? "crosshair" : "default",
+                  pointerEvents: maskEditing ? "auto" : "none"}}>
+                {polygon.length >= 3 && <polygon points={polygonPoints} fill="#ff3030"
+                  fillOpacity="0.38" stroke="#ff3030" strokeWidth="4" />}
+                {maskEditing && polygon.length === 2 && <polyline points={polygonPoints}
+                  fill="none" stroke="#ffdc00" strokeWidth="4" />}
+                {maskEditing && polygon.map(([x, y], index) =>
+                  <circle key={index} cx={x * 1000} cy={y * 1000} r="8"
+                    fill="#ffdc00" stroke="#111" strokeWidth="2" />)}
+              </svg>}
+            </div>
+            <div style={{...muted, marginTop: Styles.vars.spacing.small}}>
+              {maskEditing ? "Click points around the area to exclude, then save." :
+                "Redraw to set the area used by this mask toggle."}
+            </div>
+            <div style={{display: "flex", flexWrap: "wrap", gap: Styles.vars.spacing.small,
+              marginTop: Styles.vars.spacing.small}}>
+              {maskEditing ? <React.Fragment>
+                <Button buttonDownAction={null} buttonUpAction={() => this.setState(previous => ({
+                  maskDraft: previous.maskDraft.slice(0, -1), maskMessage: ""
+                }))} disabled={maskDraft.length === 0}>Undo point</Button>
+                <Button buttonDownAction={null} buttonUpAction={() => this.saveMask()}
+                  disabled={!namespace || maskDraft.length < 3}>Save polygon</Button>
+                <Button buttonDownAction={null} buttonUpAction={() =>
+                  this.setState({maskDraft: null, maskMessage: ""})}>Cancel</Button>
+              </React.Fragment> :
+                <Button buttonDownAction={null} buttonUpAction={() =>
+                  this.setState({maskDraft: [], maskMessage: ""})}
+                  disabled={!namespace}>Redraw polygon</Button>}
+            </div>
+            {maskMessage && <div style={{...muted, marginTop: Styles.vars.spacing.small}}>
+              {maskMessage}
+            </div>}
+            <Label title="Use mask for tracking">
+              <AsyncToggle checked={!!telemetry.mask_foreground} disabled={!namespace}
+                onClick={() => this.props.ros.sendBoolMsg(`${namespace}/set_mask_foreground`, !telemetry.mask_foreground)} />
+            </Label>
+          </Section>
+        </div>
 
         <Section title="Optical flow controls">
           <Label title="X displacement"><strong>{typeof telemetry.x === "number" ? `${telemetry.x.toFixed(1)} px` : "—"}</strong></Label>
@@ -177,10 +283,6 @@ class OpticalFlowApp extends Component {
             <div style={{...muted, marginTop: Styles.vars.spacing.small}}>
               k1: −0.30 to +0.30 (0 = off)
             </div>
-            <Label title="Mask ROV claw and cable">
-              <AsyncToggle checked={!!telemetry.mask_foreground} disabled={!namespace}
-                onClick={() => this.props.ros.sendBoolMsg(`${namespace}/set_mask_foreground`, !telemetry.mask_foreground)} />
-            </Label>
             <div style={{marginTop: Styles.vars.spacing.regular}}>
               <Button buttonDownAction={null} buttonUpAction={() =>
                 this.props.ros.sendBoolMsg(`${namespace}/reset_reference`, true)}

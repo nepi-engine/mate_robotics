@@ -12,22 +12,13 @@ import rospy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32, String
 
+from mask_geometry import DEFAULT_MASK_POLYGON, foreground_feature_mask, validate_mask_polygon
 from optical_flow import OpticalFlow
 from radial_undistort import DEFAULT_K1, build_maps, correct, validate_k1
 
 
 MAX_TRAIL_POINTS = 4000
 MIN_TRAIL_STEP_PX = 1.0
-
-
-def foreground_feature_mask(shape):
-    """Optional mask for the original ROV claw and cable (scaled from 640x480)."""
-    height, width = shape[:2]
-    mask = np.full((height, width), 255, dtype=np.uint8)
-    for x0, y0, x1, y1 in ((0, 290, 640, 480), (0, 170, 280, 290)):
-        mask[round(y0 * height / 480):round(y1 * height / 480),
-             round(x0 * width / 640):round(x1 * width / 640)] = 0
-    return mask
 
 
 def decode_image(message):
@@ -80,6 +71,12 @@ class OpticalFlowApp:
         self.available_topics = []
         self.k1 = validate_k1(rospy.get_param("~k1", DEFAULT_K1))
         self.mask_foreground = bool(rospy.get_param("~mask_foreground", False))
+        try:
+            self.mask_polygon = validate_mask_polygon(
+                rospy.get_param("~mask_polygon", DEFAULT_MASK_POLYGON))
+        except ValueError as error:
+            rospy.logwarn("Invalid saved optical-flow mask; using default: %s", error)
+            self.mask_polygon = validate_mask_polygon(DEFAULT_MASK_POLYGON)
         self.reset_requested = True
         self.tracker = None
         self.maps = None
@@ -89,9 +86,11 @@ class OpticalFlowApp:
         self.status = "Waiting for camera"
         self.telemetry_pub = rospy.Publisher("~telemetry", String, queue_size=2, latch=True)
         self.image_pub = rospy.Publisher("~annotated_image", Image, queue_size=1)
+        self.save_params_pub = rospy.Publisher("save_params", String, queue_size=1)
         rospy.Subscriber("~set_image_topic", String, self.set_image_topic, queue_size=1)
         rospy.Subscriber("~set_k1", Float32, self.set_k1, queue_size=1)
         rospy.Subscriber("~set_mask_foreground", Bool, self.set_mask, queue_size=1)
+        rospy.Subscriber("~set_mask_polygon", String, self.set_mask_polygon, queue_size=1)
         rospy.Subscriber("~reset_reference", Bool, self.reset_reference, queue_size=1)
         rospy.Timer(rospy.Duration(2.0), self.refresh_topics)
         self.worker = threading.Thread(target=self.process_frames, daemon=True)
@@ -119,6 +118,19 @@ class OpticalFlowApp:
             self.mask_foreground = message.data
             self.reset_requested = True
         rospy.set_param("~mask_foreground", message.data)
+
+    def set_mask_polygon(self, message):
+        try:
+            polygon = validate_mask_polygon(json.loads(message.data))
+        except (ValueError, TypeError) as error:
+            rospy.logwarn("Ignoring invalid optical-flow mask polygon: %s", error)
+            return
+        with self.lock:
+            self.mask_polygon = polygon
+            self.reset_requested = True
+        rospy.set_param("~mask_polygon", polygon)
+        self.save_params_pub.publish(String(data=rospy.get_name()))
+        self.publish_telemetry(None)
 
     def reset_reference(self, message):
         if message.data:
@@ -166,7 +178,8 @@ class OpticalFlowApp:
         with self.lock:
             data = dict(status=self.status, camera_topic=self.selected_topic,
                         available_topics=self.available_topics, k1=self.k1,
-                        mask_foreground=self.mask_foreground, fps=round(self.fps, 1))
+                        mask_foreground=self.mask_foreground,
+                        mask_polygon=self.mask_polygon, fps=round(self.fps, 1))
             if sample is not None:
                 data.update(sample)
         self.telemetry_pub.publish(String(data=json.dumps(data)))
@@ -181,6 +194,7 @@ class OpticalFlowApp:
                 self.pending_frame = None
                 k1 = self.k1
                 mask_foreground = self.mask_foreground
+                mask_polygon = self.mask_polygon
                 reset = self.reset_requested
                 self.reset_requested = False
             if message is None:
@@ -196,10 +210,7 @@ class OpticalFlowApp:
                 maps = self.maps[0]
                 frame = correct(raw, k1, maps)
                 if self.tracker is None:
-                    mask = foreground_feature_mask(raw.shape) if mask_foreground else None
-                    if mask is not None and maps is not None:
-                        mask = cv2.remap(mask, *maps, interpolation=cv2.INTER_NEAREST,
-                                         borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                    mask = foreground_feature_mask(frame.shape, mask_polygon) if mask_foreground else None
                     self.tracker = OpticalFlow(frame, nfeatures=700, smooth=1.0,
                                                track_incrementally=True, feature_mask=mask)
                     x = y = 0.0
