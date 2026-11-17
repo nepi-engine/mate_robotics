@@ -1,0 +1,16 @@
+FRAMEWORK: yolo26
+BASE_MODEL: yolo26n.pt
+NAME: water_bottle
+DISPLAY_NAME: water_bottle_y26
+DESCRIPTION: water bottle object detector YOLO26 nano
+CLASSES:
+  - water_bottle
+
+USE_PERCENT_DATA: 100
+RANDOM_DATA_SIZE: 100
+USE_BEST_MODEL: false
+
+IMAGE_SIZE: 640
+NUM_EPOCHS: 40
+BATCH_SIZE: 8
+NUM_WORKERS: 2

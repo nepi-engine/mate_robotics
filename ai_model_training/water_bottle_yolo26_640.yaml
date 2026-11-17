@@ -1,0 +1,19 @@
+ai_model:
+  framework:
+    name: yolo26
+  type:
+    name: detection
+  display_name:
+    name: water_bottle_y26
+  description:
+    name: water bottle object detector YOLO26 nano
+  weight_file:
+    name: water_bottle_yolo26_640.pt
+  image_size:
+    image_width:
+      value: 640
+    image_height:
+      value: 640
+  classes:
+    names:
+    - water_bottle

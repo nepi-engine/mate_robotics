@@ -1,0 +1,7 @@
+path: /home/rov/ai_training/my_yolo26_project/model_training
+train: train_data.txt
+val: val_data.txt
+test: test_data.txt
+nc: 1
+names:
+- water_bottle
